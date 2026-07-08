@@ -260,6 +260,7 @@ def train(
             log_config.update({'alg': alg_name})
         wandb.init(
             dir=logs_dir,
+            entity=entity_name,
             project=project_name,
             sync_tensorboard=True,
             config=log_config,
@@ -276,10 +277,12 @@ def train(
                            env.action_space.sample(),
                            reward_list, **alg_kwargs)
     elif alg_name == 'sombrl':
+        sombrl_kwargs = dict(alg_kwargs)
+        reward_model = sombrl_kwargs.pop('reward_model', None)
         agent = SombrlExplorerLearner(seed,
                            env.observation_space.sample(),
                            env.action_space.sample(),
-                           reward_list, **alg_kwargs)
+                           reward_model=reward_model, **sombrl_kwargs)
     else:
         raise NotImplementedError()
     if n_steps_returns < 0:
