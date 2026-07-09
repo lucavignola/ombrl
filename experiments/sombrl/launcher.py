@@ -1,5 +1,6 @@
 import argparse
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -118,7 +119,10 @@ def main(args):
 
     for flags in build_flags(args.project_name, args.entity_name):
         flags['logs_dir'] = logs_dir
-        command_list.append(setup_prefix + generate_base_command(exp, flags=flags))
+        cmd = setup_prefix + generate_base_command(exp, flags=flags)
+        if args.mode == 'euler':
+            cmd = f'bash -lc {shlex.quote(cmd)}'
+        command_list.append(cmd)
 
     num_hours = args.hours
     generate_run_commands(command_list,

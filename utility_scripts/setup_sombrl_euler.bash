@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+if ! command -v module >/dev/null 2>&1; then
+  source /etc/profile
+fi
+
 export XLA_FLAGS=--xla_gpu_triton_gemm_any=true
 export WANDB_CACHE_DIR=/cluster/scratch/lvignola/wandb
 export MUJOCO_GL=osmesa
