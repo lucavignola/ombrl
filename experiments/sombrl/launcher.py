@@ -1,4 +1,6 @@
 import argparse
+import ast
+import itertools
 import os
 import shlex
 import sys
@@ -8,12 +10,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from experiments.maxinfombsac import experiment as exp
-from experiments.utils import dict_permutations, generate_base_command, generate_run_commands
-
-
 PROJECT_NAME = 'SOMBRL_Fig3_State_MBPO'
 ENTITY = 'lvignola-eth-z-rich'
+EXP_FILE = REPO_ROOT / 'experiments' / 'maxinfombsac' / 'experiment.py'
 
 COMMON = {
     'batch_size': [256],
@@ -55,7 +54,7 @@ MOUNTAIN_CAR = {
     'max_steps': [40_000],
     'eval_interval': [1_000],
     'action_repeat': [1],
-    'hidden_dims': [256],
+    'num_neurons': [256],
 }
 
 CARTPOLE = {
@@ -64,7 +63,7 @@ CARTPOLE = {
     'eval_interval': [10_000],
     'action_repeat': [2],
     'action_cost': [0.0],
-    'hidden_dims': [256],
+    'num_neurons': [256],
 }
 
 HOPPER = {
@@ -72,7 +71,7 @@ HOPPER = {
     'max_steps': [1_000_000],
     'eval_interval': [10_000],
     'action_repeat': [2],
-    'hidden_dims': [256],
+    'num_neurons': [256],
 }
 
 QUADRUPED = {
@@ -80,7 +79,7 @@ QUADRUPED = {
     'max_steps': [3_000_000],
     'eval_interval': [10_000],
     'action_repeat': [2],
-    'hidden_dims': [512],
+    'num_neurons': [512],
 }
 
 HUMANOID = {
@@ -88,10 +87,72 @@ HUMANOID = {
     'max_steps': [3_000_000],
     'eval_interval': [10_000],
     'action_repeat': [2],
-    'hidden_dims': [512],
+    'num_neurons': [512],
 }
 
 TASKS = [MOUNTAIN_CAR, CARTPOLE, HOPPER, QUADRUPED, HUMANOID]
+
+
+def dict_permutations(d):
+    keys = d.keys()
+    return [dict(zip(keys, values)) for values in itertools.product(*d.values())]
+
+
+def generate_base_command(flags=None, interpreter=None):
+    if interpreter is None:
+        interpreter = sys.executable
+    cmd = f'{interpreter} -u {EXP_FILE}'
+    if flags is not None:
+        for flag, setting in flags.items():
+            if isinstance(setting, bool):
+                if setting:
+                    cmd += f' --{flag}'
+            else:
+                cmd += f' --{flag}={setting}'
+    return cmd
+
+
+def generate_run_commands(command_list, num_cpus=1, num_gpus=0, dry=False,
+                          mem=2 * 1028, duration='3:59:00', mode='local',
+                          prompt=True, gpu_type=None):
+    if mode == 'euler':
+        base = (
+            f'sbatch --time={duration} --mem-per-cpu={mem} '
+            f'--cpus-per-task {num_cpus} --account=ls_krausea '
+        )
+        if num_gpus > 0:
+            if gpu_type is None:
+                base += f'-G {num_gpus} --gres=gpumem:10240m '
+            else:
+                base += f'--gpus={gpu_type}:{num_gpus} '
+
+        cluster_cmds = [base + f'--wrap={shlex.quote(cmd)}' for cmd in command_list]
+        if dry:
+            for cmd in cluster_cmds:
+                print(cmd)
+            return
+
+        answer = 'yes'
+        if prompt:
+            answer = input(f'about to launch {len(command_list)} jobs with {num_cpus} cores each. proceed? [yes/no]')
+        if answer == 'yes':
+            for cmd in cluster_cmds:
+                os.system(cmd)
+        return
+
+    if mode == 'local':
+        answer = 'yes'
+        if prompt:
+            answer = input(f'about to run {len(command_list)} jobs in a loop. proceed? [yes/no]')
+        if answer == 'yes':
+            for cmd in command_list:
+                if dry:
+                    print(cmd)
+                else:
+                    os.system(cmd)
+        return
+
+    raise NotImplementedError(f'Unsupported mode: {mode}')
 
 
 def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY):
@@ -103,6 +164,29 @@ def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY):
             task_flags['entity_name'] = [entity_name]
             flags.extend(dict_permutations(task_flags))
     return flags
+
+
+def validate_experiment_flags(flags):
+    parser_args = set()
+    with open(EXP_FILE, 'r') as f:
+        tree = ast.parse(f.read(), filename=str(EXP_FILE))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != 'add_argument':
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        arg_name = node.args[0].value
+        if isinstance(arg_name, str) and arg_name.startswith('--'):
+            parser_args.add(arg_name[2:].replace('-', '_'))
+
+    invalid = sorted(set().union(*(flag.keys() for flag in flags)) - parser_args)
+    if invalid:
+        raise ValueError(
+            f'Launcher generated flags not accepted by {EXP_FILE}: {invalid}'
+        )
 
 
 def main(args):
@@ -117,9 +201,13 @@ def main(args):
     if args.euler_setup:
         setup_prefix = f'. {os.path.abspath(args.euler_setup)} && '
 
-    for flags in build_flags(args.project_name, args.entity_name):
+    all_flags = build_flags(args.project_name, args.entity_name)
+    validate_experiment_flags(all_flags)
+
+    for flags in all_flags:
         flags['logs_dir'] = logs_dir
-        cmd = setup_prefix + generate_base_command(exp, flags=flags)
+        interpreter = 'python' if args.mode == 'euler' else None
+        cmd = setup_prefix + generate_base_command(flags=flags, interpreter=interpreter)
         if args.mode == 'euler':
             cmd = f'bash -lc {shlex.quote(cmd)}'
         command_list.append(cmd)
