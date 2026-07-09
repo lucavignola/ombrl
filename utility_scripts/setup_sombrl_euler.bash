@@ -9,7 +9,6 @@ export PYTHONPATH="${OMBRL_REPO_ROOT}:${PYTHONPATH:-}"
 
 export XLA_FLAGS=--xla_gpu_triton_gemm_any=true
 export JAX_PLATFORMS=cuda,cpu
-export JAX_CUDA_PLUGIN_USE_PJRT_C_API_ON_TPU=false
 export WANDB_CACHE_DIR=/cluster/scratch/lvignola/wandb
 export MUJOCO_GL=osmesa
 export WANDB_API_KEY='your_key'
@@ -35,6 +34,19 @@ if [ -n "${OMBRL_VENV:-}" ]; then
   source "${OMBRL_VENV}/bin/activate"
 fi
 
+if [ -z "${CUDA_ROOT:-}" ]; then
+  CUDA_ROOT_FROM_NVCC="$(python - <<'PY'
+import importlib.util
+spec = importlib.util.find_spec("nvidia.cuda_nvcc")
+if spec is not None and spec.submodule_search_locations:
+    print(next(iter(spec.submodule_search_locations)))
+PY
+)"
+  if [ -n "${CUDA_ROOT_FROM_NVCC}" ]; then
+    export CUDA_ROOT="${CUDA_ROOT_FROM_NVCC}"
+  fi
+fi
+
 python - <<'PY'
 import importlib.metadata as md
 pkgs = [
@@ -48,7 +60,6 @@ pkgs = [
     "orbax-checkpoint",
     "distrax",
     "tensorflow-probability",
-    "nvidia-cuda-nvcc-cu12",
 ]
 versions = {}
 for pkg in pkgs:
@@ -73,14 +84,5 @@ if jax_version:
             "This repo's jaxrl/tensorflow-probability stack is not compatible "
             f"with jax=={jax_version}. Install the pinned JAX 0.4.x CUDA stack."
         )
-print("JAX packages:", versions)
-
-if "nvidia-cuda-nvcc-cu12" in versions:
-    import nvidia.cuda_nvcc as cuda_nvcc
-    if getattr(cuda_nvcc, "__file__", None) is None:
-        raise RuntimeError(
-            "nvidia-cuda-nvcc-cu12 is installed but exposes nvidia.cuda_nvcc "
-            "without __file__, which breaks jax==0.4.35 import. "
-            "Run: pip uninstall -y nvidia-cuda-nvcc-cu12"
-        )
+print("Pinned JAX stack:", versions)
 PY
