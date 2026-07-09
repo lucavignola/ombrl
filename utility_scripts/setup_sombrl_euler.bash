@@ -32,3 +32,24 @@ module load python/3.11.6
 if [ -n "${OMBRL_VENV:-}" ]; then
   source "${OMBRL_VENV}/bin/activate"
 fi
+
+python - <<'PY'
+import importlib.metadata as md
+pkgs = ["jax", "jaxlib", "jax-cuda12-plugin", "jax-cuda12-pjrt"]
+versions = {}
+for pkg in pkgs:
+    try:
+        versions[pkg] = md.version(pkg)
+    except md.PackageNotFoundError:
+        pass
+
+jaxlib_version = versions.get("jaxlib")
+plugin_version = versions.get("jax-cuda12-plugin")
+if jaxlib_version and plugin_version and jaxlib_version != plugin_version:
+    raise RuntimeError(
+        "JAX CUDA package mismatch: "
+        f"jaxlib=={jaxlib_version}, jax-cuda12-plugin=={plugin_version}. "
+        "Reinstall matching JAX CUDA packages in the venv."
+    )
+print("JAX packages:", versions)
+PY
