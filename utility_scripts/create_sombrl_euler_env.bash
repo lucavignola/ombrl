@@ -8,6 +8,14 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PATH="${1:-/cluster/home/lvignola/venvs/ombrl-sombrl}"
 
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+  deactivate || true
+  PATH="${PATH//${VIRTUAL_ENV}\/bin:/}"
+  PATH="${PATH//:${VIRTUAL_ENV}\/bin/}"
+  unset VIRTUAL_ENV
+fi
+hash -r
+
 module load stack/2024-06
 module load gcc/12.2.0
 module load eth_proxy
@@ -15,13 +23,19 @@ module load python/3.11.6
 
 python -m venv --clear "${VENV_PATH}"
 source "${VENV_PATH}/bin/activate"
+hash -r
 
 python -m pip install --upgrade pip setuptools wheel
-pip uninstall -y ombrl || true
+python -m pip uninstall -y ombrl || true
+if python -m pip show ombrl >/dev/null 2>&1; then
+  echo "ERROR: stale ombrl package metadata is still installed in ${VIRTUAL_ENV}" >&2
+  python -m pip show ombrl >&2
+  exit 1
+fi
 
-pip install --no-cache-dir -r "${REPO_ROOT}/utility_scripts/euler_constraints.txt"
+python -m pip install --no-cache-dir -r "${REPO_ROOT}/utility_scripts/euler_constraints.txt"
 
-pip install --no-cache-dir --constraint "${REPO_ROOT}/utility_scripts/euler_constraints.txt" \
+python -m pip install --no-cache-dir --constraint "${REPO_ROOT}/utility_scripts/euler_constraints.txt" \
   pandas \
   jaxtyping \
   gymnasium==0.29.1 \
