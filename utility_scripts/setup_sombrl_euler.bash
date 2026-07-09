@@ -4,6 +4,9 @@ if ! command -v module >/dev/null 2>&1; then
   source /etc/profile
 fi
 
+OMBRL_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${OMBRL_REPO_ROOT}:${PYTHONPATH:-}"
+
 export XLA_FLAGS=--xla_gpu_triton_gemm_any=true
 export WANDB_CACHE_DIR=/cluster/scratch/lvignola/wandb
 export MUJOCO_GL=osmesa
