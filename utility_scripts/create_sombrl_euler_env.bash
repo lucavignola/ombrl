@@ -41,6 +41,10 @@ if python -m pip show ombrl >/dev/null 2>&1; then
   exit 1
 fi
 
+python -m pip install --no-cache-dir \
+  --constraint "${REPO_ROOT}/utility_scripts/euler_constraints.txt" \
+  "jax[cuda12]==0.4.34"
+
 python -m pip install --no-cache-dir -r "${REPO_ROOT}/utility_scripts/euler_constraints.txt"
 
 python -m pip install --no-cache-dir --constraint "${REPO_ROOT}/utility_scripts/euler_constraints.txt" \
