@@ -8,6 +8,13 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PATH="${1:-/cluster/home/lvignola/venvs/ombrl-sombrl}"
 
+rm -rf "${REPO_ROOT}/ombrl.egg-info"
+if [ -n "${PYTHONPATH:-}" ]; then
+  PYTHONPATH="${PYTHONPATH//${REPO_ROOT}:/}"
+  PYTHONPATH="${PYTHONPATH//:${REPO_ROOT}/}"
+  export PYTHONPATH
+fi
+
 if [ -n "${VIRTUAL_ENV:-}" ]; then
   deactivate || true
   PATH="${PATH//${VIRTUAL_ENV}\/bin:/}"
@@ -28,7 +35,8 @@ hash -r
 python -m pip install --upgrade pip setuptools wheel
 python -m pip uninstall -y ombrl || true
 if python -m pip show ombrl >/dev/null 2>&1; then
-  echo "ERROR: stale ombrl package metadata is still installed in ${VIRTUAL_ENV}" >&2
+  echo "ERROR: stale ombrl package metadata is still visible in ${VIRTUAL_ENV}" >&2
+  echo "Remove ${REPO_ROOT}/ombrl.egg-info and ensure PYTHONPATH does not contain ${REPO_ROOT} while bootstrapping." >&2
   python -m pip show ombrl >&2
   exit 1
 fi
