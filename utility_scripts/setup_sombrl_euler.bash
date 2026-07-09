@@ -47,7 +47,10 @@ fi
 if [ -z "${CUDA_ROOT:-}" ]; then
   CUDA_ROOT_FROM_NVCC="$(python - <<'PY'
 import importlib.util
-spec = importlib.util.find_spec("nvidia.cuda_nvcc")
+try:
+    spec = importlib.util.find_spec("nvidia.cuda_nvcc")
+except ModuleNotFoundError:
+    spec = None
 if spec is not None and spec.submodule_search_locations:
     print(next(iter(spec.submodule_search_locations)))
 PY
