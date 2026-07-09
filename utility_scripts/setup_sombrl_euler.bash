@@ -11,8 +11,8 @@ export XLA_FLAGS=--xla_gpu_triton_gemm_any=true
 export JAX_PLATFORMS=cuda,cpu
 export WANDB_CACHE_DIR=/cluster/scratch/lvignola/wandb
 export MUJOCO_GL=osmesa
-export WANDB_API_KEY='your_key'
-export OMBRL_VENV=/cluster/home/lvignola/path/to/venv
+export WANDB_API_KEY="${WANDB_API_KEY:-your_key}"
+export OMBRL_VENV="${OMBRL_VENV:-/cluster/home/lvignola/venvs/ombrl-sombrl}"
 
 module load stack/2024-06
 module load gcc/12.2.0
@@ -31,6 +31,10 @@ module load libxfixes/5.0.2-5fbeidb
 module load python/3.11.6
 
 if [ -n "${OMBRL_VENV:-}" ]; then
+  if [ ! -f "${OMBRL_VENV}/bin/activate" ]; then
+    echo "ERROR: OMBRL_VENV does not contain bin/activate: ${OMBRL_VENV}" >&2
+    return 1 2>/dev/null || exit 1
+  fi
   source "${OMBRL_VENV}/bin/activate"
 fi
 

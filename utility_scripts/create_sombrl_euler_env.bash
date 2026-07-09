@@ -54,6 +54,18 @@ python -m pip install --no-cache-dir --constraint "${REPO_ROOT}/utility_scripts/
   mujoco \
   "maxinforl_jax @ git+https://github.com/sukhijab/maxinforl_jax.git"
 
+python - <<'PY'
+import importlib.metadata as md
+for pkg in ["numpy", "jax", "jaxlib", "tensorflow-probability", "maxinforl_jax", "gymnasium"]:
+    try:
+        print(pkg, md.version(pkg))
+    except md.PackageNotFoundError as exc:
+        raise SystemExit(f"Missing required package after install: {pkg}") from exc
+
+import maxinforl_jax
+print("maxinforl_jax import ok")
+PY
+
 echo
 echo "Created SOMBRL Euler venv at: ${VENV_PATH}"
 echo "Set this in utility_scripts/setup_sombrl_euler.bash:"
