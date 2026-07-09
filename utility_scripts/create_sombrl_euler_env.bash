@@ -13,10 +13,11 @@ module load gcc/12.2.0
 module load eth_proxy
 module load python/3.11.6
 
-python -m venv "${VENV_PATH}"
+python -m venv --clear "${VENV_PATH}"
 source "${VENV_PATH}/bin/activate"
 
 python -m pip install --upgrade pip setuptools wheel
+pip uninstall -y ombrl || true
 
 pip install --no-cache-dir -r "${REPO_ROOT}/utility_scripts/euler_constraints.txt"
 
