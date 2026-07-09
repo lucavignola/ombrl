@@ -1,10 +1,10 @@
 # Pinned JAX stack for the legacy jaxrl / tensorflow-probability substrate used by OMBRL.
 # Keep these in sync: newer JAX releases remove APIs used by the jaxrl/TFP dependency chain.
 numpy==1.26.4
-jax[cuda12]==0.4.35
-jaxlib==0.4.35
-jax-cuda12-plugin==0.4.35
-jax-cuda12-pjrt==0.4.35
+jax[cuda12]==0.4.34
+jaxlib==0.4.34
+jax-cuda12-plugin==0.4.34
+jax-cuda12-pjrt==0.4.34
 
 # JAX ecosystem versions compatible with JAX 0.4.x.
 chex==0.1.86

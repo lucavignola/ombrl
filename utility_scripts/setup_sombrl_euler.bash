@@ -97,7 +97,7 @@ if jax_version:
     if (major, minor) >= (0, 5):
         raise RuntimeError(
             "This repo's jaxrl/tensorflow-probability stack is not compatible "
-            f"with jax=={jax_version}. Install the pinned JAX 0.4.x CUDA stack."
+            f"with jax=={jax_version}. Install the pinned JAX 0.4.34 CUDA stack."
         )
 print("Pinned JAX stack:", versions)
 PY
