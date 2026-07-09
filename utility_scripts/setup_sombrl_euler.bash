@@ -44,22 +44,6 @@ if [ -n "${OMBRL_VENV:-}" ]; then
   source "${OMBRL_VENV}/bin/activate"
 fi
 
-if [ -z "${CUDA_ROOT:-}" ]; then
-  CUDA_ROOT_FROM_NVCC="$(python - <<'PY'
-import importlib.util
-try:
-    spec = importlib.util.find_spec("nvidia.cuda_nvcc")
-except ModuleNotFoundError:
-    spec = None
-if spec is not None and spec.submodule_search_locations:
-    print(next(iter(spec.submodule_search_locations)))
-PY
-)"
-  if [ -n "${CUDA_ROOT_FROM_NVCC}" ]; then
-    export CUDA_ROOT="${CUDA_ROOT_FROM_NVCC}"
-  fi
-fi
-
 python - <<'PY'
 import importlib.metadata as md
 pkgs = [
