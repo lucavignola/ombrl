@@ -35,7 +35,18 @@ fi
 
 python - <<'PY'
 import importlib.metadata as md
-pkgs = ["jax", "jaxlib", "jax-cuda12-plugin", "jax-cuda12-pjrt"]
+pkgs = [
+    "jax",
+    "jaxlib",
+    "jax-cuda12-plugin",
+    "jax-cuda12-pjrt",
+    "chex",
+    "optax",
+    "flax",
+    "orbax-checkpoint",
+    "distrax",
+    "tensorflow-probability",
+]
 versions = {}
 for pkg in pkgs:
     try:
