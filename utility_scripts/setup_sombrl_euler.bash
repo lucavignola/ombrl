@@ -12,7 +12,8 @@ export JAX_PLATFORMS=cuda,cpu
 export WANDB_CACHE_DIR=/cluster/scratch/lvignola/wandb
 export MUJOCO_GL=osmesa
 export WANDB_API_KEY="${WANDB_API_KEY:-your_key}"
-export OMBRL_VENV="${OMBRL_VENV:-/cluster/home/lvignola/venvs/ombrl-sombrl}"
+DEFAULT_OMBRL_VENV=/cluster/home/lvignola/venvs/ombrl-sombrl
+export OMBRL_VENV="${OMBRL_VENV:-${DEFAULT_OMBRL_VENV}}"
 
 module load stack/2024-06
 module load gcc/12.2.0
@@ -32,8 +33,13 @@ module load python/3.11.6
 
 if [ -n "${OMBRL_VENV:-}" ]; then
   if [ ! -f "${OMBRL_VENV}/bin/activate" ]; then
-    echo "ERROR: OMBRL_VENV does not contain bin/activate: ${OMBRL_VENV}" >&2
-    return 1 2>/dev/null || exit 1
+    if [ -f "${DEFAULT_OMBRL_VENV}/bin/activate" ]; then
+      echo "WARNING: ignoring invalid OMBRL_VENV=${OMBRL_VENV}; using ${DEFAULT_OMBRL_VENV}" >&2
+      export OMBRL_VENV="${DEFAULT_OMBRL_VENV}"
+    else
+      echo "ERROR: OMBRL_VENV does not contain bin/activate: ${OMBRL_VENV}" >&2
+      return 1 2>/dev/null || exit 1
+    fi
   fi
   source "${OMBRL_VENV}/bin/activate"
 fi
