@@ -45,11 +45,19 @@ for pkg in pkgs:
 
 jaxlib_version = versions.get("jaxlib")
 plugin_version = versions.get("jax-cuda12-plugin")
+jax_version = versions.get("jax")
 if jaxlib_version and plugin_version and jaxlib_version != plugin_version:
     raise RuntimeError(
         "JAX CUDA package mismatch: "
         f"jaxlib=={jaxlib_version}, jax-cuda12-plugin=={plugin_version}. "
         "Reinstall matching JAX CUDA packages in the venv."
     )
+if jax_version:
+    major, minor, *_ = [int(part) for part in jax_version.split(".")[:2]]
+    if (major, minor) >= (0, 5):
+        raise RuntimeError(
+            "This repo's jaxrl/tensorflow-probability stack is not compatible "
+            f"with jax=={jax_version}. Install the pinned JAX 0.4.x CUDA stack."
+        )
 print("JAX packages:", versions)
 PY
