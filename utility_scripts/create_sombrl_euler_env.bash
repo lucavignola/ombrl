@@ -20,8 +20,7 @@ python -m pip install --upgrade pip setuptools wheel
 
 pip install --no-cache-dir -r "${REPO_ROOT}/utility_scripts/euler_constraints.txt"
 
-pip install --no-cache-dir \
-  numpy==1.26.4 \
+pip install --no-cache-dir --constraint "${REPO_ROOT}/utility_scripts/euler_constraints.txt" \
   pandas \
   jaxtyping \
   gymnasium==0.29.1 \
@@ -32,9 +31,11 @@ pip install --no-cache-dir \
   mujoco \
   "maxinforl_jax @ git+https://github.com/sukhijab/maxinforl_jax.git"
 
-pip install -e "${REPO_ROOT}" --no-deps
-
 echo
 echo "Created SOMBRL Euler venv at: ${VENV_PATH}"
 echo "Set this in utility_scripts/setup_sombrl_euler.bash:"
 echo "export OMBRL_VENV=${VENV_PATH}"
+echo
+echo "OMBRL itself is intentionally not pip-installed; setup_sombrl_euler.bash"
+echo "adds the repo root to PYTHONPATH so this reproduction env can omit"
+echo "unrelated setup.py dependencies such as humanoid-bench and metaworld."
