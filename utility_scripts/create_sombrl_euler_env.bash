@@ -56,7 +56,18 @@ python -m pip install --no-cache-dir --constraint "${REPO_ROOT}/utility_scripts/
 
 python - <<'PY'
 import importlib.metadata as md
-for pkg in ["numpy", "jax", "jaxlib", "tensorflow-probability", "maxinforl_jax", "gymnasium"]:
+for pkg in [
+    "numpy",
+    "jax",
+    "jaxlib",
+    "jax-cuda12-plugin",
+    "jax-cuda12-pjrt",
+    "nvidia-cudnn-cu12",
+    "nvidia-cublas-cu12",
+    "tensorflow-probability",
+    "maxinforl_jax",
+    "gymnasium",
+]:
     try:
         print(pkg, md.version(pkg))
     except md.PackageNotFoundError as exc:
