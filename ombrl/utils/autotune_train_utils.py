@@ -14,7 +14,7 @@ from maxinforl_jax.agents import MaxInfoSacLearner
 from ombrl.agents import MaxInfoOmbrlLearner
 from jaxrl.datasets import ReplayBuffer
 from maxinforl_jax.datasets import NstepReplayBuffer
-from ombrl.utils.wrappers import PendulumInitWrapper
+from ombrl.utils.wrappers import AdditiveGaussianProcessNoise, PendulumInitWrapper
 from jaxrl.evaluation import evaluate
 from jaxrl.utils import make_env
 import wandb
@@ -23,6 +23,12 @@ from gymnasium.wrappers import RescaleAction
 from gymnasium.wrappers.pixel_observation import PixelObservationWrapper
 
 from jaxrl import wrappers
+
+
+def add_process_noise(env, process_noise_std: float, seed: int):
+    if process_noise_std > 0.0:
+        return AdditiveGaussianProcessNoise(env, noise_std=process_noise_std, seed=seed)
+    return env
 
 
 def make_humanoid_bench_env(
@@ -195,6 +201,8 @@ def train(
         eval_episode_trigger: Optional[Callable[[int], bool]] = None,
 ):
     run_name = f"{env_name}__{alg_name}__{seed}__{int(time.time())}__{exp_hash}"
+    env_kwargs = dict(env_kwargs)
+    process_noise_std = float(env_kwargs.pop('process_noise_std', 0.0))
 
     if save_video:
         video_train_folder = os.path.join(logs_dir, 'video', 'train')
@@ -214,11 +222,15 @@ def train(
                                            recording_image_size=recording_image_size,
                                            episode_trigger=eval_episode_trigger,
                                            **env_kwargs)
+        env = add_process_noise(env, process_noise_std, seed)
+        eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
     elif 'metaworld' in env_name:
         _, task_name = env_name.split('_')
         env = make_metaworld_env(env_name=task_name, seed=seed, save_folder=video_train_folder, **env_kwargs)
         eval_env = make_metaworld_env(env_name=task_name, seed=seed + 42,
                                       save_folder=video_eval_folder, **env_kwargs)
+        env = add_process_noise(env, process_noise_std, seed)
+        eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
     else:
         env = make_env(env_name=env_name, seed=seed,
                        save_folder=video_train_folder,
@@ -237,6 +249,8 @@ def train(
             # HACK for Pendulum
             env = PendulumInitWrapper(env, init_angle=0.0, init_vel=0.0)
             eval_env = PendulumInitWrapper(env, init_angle=0.0, init_vel=0.0)
+        env = add_process_noise(env, process_noise_std, seed)
+        eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
 
     np.random.seed(seed)
     random.seed(seed)

@@ -7,15 +7,13 @@ import numpy as np
 import optax
 import copy
 from jaxrl.agents.sac import temperature
-from maxinforl_jax.agents.maxinfosac.actor import update as update_actor
 from maxinforl_jax.agents.maxinfosac.critic import target_update
-from maxinforl_jax.agents.maxinfosac.critic import update as update_critic
 from ombrl.utils.pertubation import PerturbationModule
 from jaxrl.agents.sac.temperature import update as update_temp
 
 from jaxrl.datasets import Batch
 from jaxrl.networks import critic_net, policies
-from jaxrl.networks.common import InfoDict, Model, PRNGKey
+from jaxrl.networks.common import InfoDict, Model, Params, PRNGKey
 
 from maxinforl_jax.models import EnsembleState, DeterministicEnsemble, ProbabilisticEnsemble
 
@@ -27,6 +25,7 @@ def get_imagined_batch(
         predict_rewards: bool,
         predict_diff: bool,
         sample_model: bool,
+        internal_noise_std: float,
         key: PRNGKey, # type: ignore
         dt: float = None,
         action_repeat: int = 1,
@@ -44,6 +43,11 @@ def get_imagined_batch(
     if predict_rewards:
         ens_mean = ens_mean[..., :-1]
         ens_std = ens_std[..., :-1]
+    ens_std = jnp.where(
+        internal_noise_std >= 0.0,
+        jnp.ones_like(ens_std) * internal_noise_std,
+        ens_std,
+    )
     next_state = ens_mean + jax.random.normal(noise_key, shape=ens_std.shape) * ens_std
 
     if predict_diff:
@@ -53,6 +57,133 @@ def get_imagined_batch(
         next_state = next_state + batch.observations
     imagined_batch = batch._replace(next_observations=next_state)
     return imagined_batch
+
+
+def _policy_actions_and_log_probs(actor: Model,
+                                  actor_params: Params,
+                                  observations: jnp.ndarray,
+                                  key: PRNGKey,
+                                  deterministic_policy: bool):
+    dist = actor.apply_fn({'params': actor_params}, observations)
+    if deterministic_policy:
+        if hasattr(dist, 'bijector') and hasattr(dist, 'distribution'):
+            actions = dist.bijector.forward(dist.distribution.mean())
+        else:
+            actions = dist.mean()
+        log_probs = jnp.zeros(observations.shape[:-1])
+    else:
+        actions = dist.sample(seed=key)
+        log_probs = dist.log_prob(actions)
+    return actions, log_probs
+
+
+def update_actor_local(key: PRNGKey,
+                       actor: Model,
+                       critic: Model,
+                       temp: Model,
+                       target_actor: Model,
+                       dyn_entropy_temp: Model,
+                       ens: DeterministicEnsemble,
+                       ens_state: EnsembleState,
+                       batch: Batch,
+                       deterministic_policy: bool,
+                       use_action_entropy: bool) -> Tuple[Model, EnsembleState, InfoDict]:
+    key, target_key = jax.random.split(key, 2)
+
+    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, Tuple[EnsembleState, InfoDict]]:
+        actions, log_probs = _policy_actions_and_log_probs(
+            actor=actor,
+            actor_params=actor_params,
+            observations=batch.observations,
+            key=key,
+            deterministic_policy=deterministic_policy,
+        )
+        q1, q2 = critic(batch.observations, actions)
+        q = jnp.minimum(q1, q2)
+
+        target_actions, _ = _policy_actions_and_log_probs(
+            actor=target_actor,
+            actor_params=target_actor.params,
+            observations=batch.observations,
+            key=target_key,
+            deterministic_policy=deterministic_policy,
+        )
+        target_inp = jnp.concatenate([batch.observations, target_actions], axis=-1)
+        inp = jnp.concatenate([batch.observations, actions], axis=-1)
+        total_inp = jnp.concatenate([inp, target_inp], axis=0)
+        info_gain, new_ens_state = ens.get_info_gain(input=total_inp,
+                                                     state=ens_state,
+                                                     update_normalizer=True)
+        info_gain, target_info_gain = info_gain[:actions.shape[0]], info_gain[actions.shape[0]:]
+        dyn_ent_coef, _ = dyn_entropy_temp()
+        act_ent_coef, _ = temp()
+        total_entropy = dyn_ent_coef * info_gain
+        if use_action_entropy:
+            total_entropy = total_entropy - act_ent_coef * log_probs
+        actor_loss = -(total_entropy + q).mean()
+        return actor_loss, (new_ens_state, {
+            'actor_loss': actor_loss,
+            'entropy': -log_probs.mean(),
+            'info_gain': info_gain.mean(),
+            'target_info_gain': target_info_gain.mean(),
+        })
+
+    new_actor, (new_ens_state, info) = actor.apply_gradient(actor_loss_fn)
+
+    return new_actor, new_ens_state, info
+
+
+def update_critic_local(key: PRNGKey,
+                        actor: Model,
+                        critic: Model,
+                        target_critic: Model,
+                        temp: Model,
+                        dyn_entropy_temp: Model,
+                        ens: DeterministicEnsemble,
+                        ens_state: EnsembleState,
+                        batch: Batch,
+                        discount: float,
+                        backup_entropy: bool,
+                        deterministic_policy: bool,
+                        use_action_entropy: bool) -> Tuple[Model, EnsembleState, InfoDict]:
+    next_actions, next_log_probs = _policy_actions_and_log_probs(
+        actor=actor,
+        actor_params=actor.params,
+        observations=batch.next_observations,
+        key=key,
+        deterministic_policy=deterministic_policy,
+    )
+
+    info_gain, new_ens_state = ens.get_info_gain(
+        input=jnp.concatenate([batch.next_observations, next_actions], axis=-1),
+        state=ens_state, update_normalizer=False)
+
+    next_q1, next_q2 = target_critic(batch.next_observations, next_actions)
+    next_q = jnp.minimum(next_q1, next_q2)
+
+    target_q = batch.rewards + discount * batch.masks * next_q
+
+    if backup_entropy:
+        dyn_ent_coef, _ = dyn_entropy_temp()
+        act_ent_coef, _ = temp()
+        total_entropy = dyn_ent_coef * info_gain
+        if use_action_entropy:
+            total_entropy = total_entropy - act_ent_coef * next_log_probs
+        target_q += discount * batch.masks * total_entropy
+
+    def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
+        q1, q2 = critic.apply_fn({'params': critic_params}, batch.observations,
+                                 batch.actions)
+        critic_loss = ((q1 - target_q) ** 2 + (q2 - target_q) ** 2).mean()
+        return critic_loss, {
+            'critic_loss': critic_loss,
+            'q1': q1.mean(),
+            'q2': q2.mean()
+        }
+
+    new_critic, info = critic.apply_gradient(critic_loss_fn)
+
+    return new_critic, new_ens_state, info
 
 
 @functools.partial(jax.jit,
@@ -65,6 +196,8 @@ def get_imagined_batch(
                                     'sample_model',
                                     'update_critic_with_real_data',
                                     'update_policy',
+                                    'deterministic_policy',
+                                    'use_action_entropy',
                                     ))
 def _update_jit(
         rng: PRNGKey, actor: Model, critic: Model, target_actor: Model, target_critic: Model, temp: Model, # type: ignore
@@ -73,11 +206,12 @@ def _update_jit(
         target_entropy: float, backup_entropy: bool, update_target: bool,
         use_log_transform: bool, predict_rewards: bool, predict_diff: bool,
         sample_model: bool, update_critic_with_real_data: bool, update_policy: bool,
-        dt: float, action_repeat: int,
+        internal_noise_std: float, dt: float, action_repeat: int,
+        deterministic_policy: bool, use_action_entropy: bool,
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, Model, Model, EnsembleState, InfoDict]: # type: ignore
     rng, key = jax.random.split(rng)
     if update_critic_with_real_data:
-        new_critic, ens_state, critic_info = update_critic(
+        new_critic, ens_state, critic_info = update_critic_local(
             key=key,
             actor=actor,
             critic=critic,
@@ -89,6 +223,8 @@ def _update_jit(
             batch=batch,
             discount=discount,
             backup_entropy=backup_entropy,
+            deterministic_policy=deterministic_policy,
+            use_action_entropy=use_action_entropy,
         )
     else:
         new_critic = critic
@@ -102,12 +238,13 @@ def _update_jit(
         predict_diff=predict_diff,
         predict_rewards=predict_rewards,
         sample_model=sample_model,
+        internal_noise_std=internal_noise_std,
         key=model_sample_key,
         dt=dt,
         action_repeat=action_repeat,
     )
     rng, key = jax.random.split(rng)
-    new_critic, ens_state, imagined_critic_info = update_critic(
+    new_critic, ens_state, imagined_critic_info = update_critic_local(
         key=key,
         actor=actor,
         critic=new_critic,
@@ -119,6 +256,8 @@ def _update_jit(
         batch=imagined_batch,
         discount=discount,
         backup_entropy=backup_entropy,
+        deterministic_policy=deterministic_policy,
+        use_action_entropy=use_action_entropy,
     )
 
     imagined_critic_info = {f'imagined_critic_{key}': val for key, val in imagined_critic_info.items()}
@@ -130,23 +269,28 @@ def _update_jit(
 
     if update_policy:
         rng, key = jax.random.split(rng)
-        new_actor, ens_state, actor_info = update_actor(key=key,
-                                                        actor=actor,
-                                                        target_actor=target_actor,
-                                                        critic=new_critic,
-                                                        temp=temp,
-                                                        dyn_entropy_temp=dyn_entropy_temp,
-                                                        ens=ens,
-                                                        ens_state=ens_state,
-                                                        batch=batch,
-                                                        )
+        new_actor, ens_state, actor_info = update_actor_local(key=key,
+                                                              actor=actor,
+                                                              target_actor=target_actor,
+                                                              critic=new_critic,
+                                                              temp=temp,
+                                                              dyn_entropy_temp=dyn_entropy_temp,
+                                                              ens=ens,
+                                                              ens_state=ens_state,
+                                                              batch=batch,
+                                                              deterministic_policy=deterministic_policy,
+                                                              use_action_entropy=use_action_entropy,
+                                                              )
         if update_target:
             new_target_actor = target_update(new_actor, target_actor, tau)
         else:
             new_target_actor = target_actor
 
-        new_temp, alpha_info = update_temp(temp, actor_info['entropy'],
-                                           target_entropy, use_log_transform=use_log_transform)
+        if use_action_entropy:
+            new_temp, alpha_info = update_temp(temp, actor_info['entropy'],
+                                               target_entropy, use_log_transform=use_log_transform)
+        else:
+            new_temp, alpha_info = temp, {}
         new_dyn_entropy_temp, dyn_ent_info = update_temp(dyn_entropy_temp, actor_info['info_gain'],
                                                          actor_info['target_info_gain'],
                                                          use_log_transform=use_log_transform)
@@ -227,6 +371,7 @@ class MaxInfoOmbrlLearner(object):
                  init_mean: Optional[np.ndarray] = None,
                  policy_final_fc_init_scale: float = 1.0,
                  sample_model: bool = True,
+                 internal_noise_std: Optional[float] = None,
                  critic_real_data_update_period: int = 2,
                  policy_update_period: Optional[int] = None,
                  max_gradient_norm: Optional[float] = None,
@@ -236,6 +381,9 @@ class MaxInfoOmbrlLearner(object):
                  perturb_rate: float = 0.2,
                  perturb_policy: bool = True,
                  perturb_model: bool = True,
+                 deterministic_policy: bool = False,
+                 deterministic_train_actions: bool = False,
+                 use_action_entropy: bool = True,
                  pseudo_ct: bool = False,
                  dt: float = None,
                  action_repeat: int = None,
@@ -248,6 +396,10 @@ class MaxInfoOmbrlLearner(object):
         self.predict_diff = predict_diff
         self.num_heads = num_heads
         self.sample_model = sample_model
+        self.internal_noise_std = -1.0 if internal_noise_std is None else internal_noise_std
+        self.deterministic_policy = deterministic_policy
+        self.deterministic_train_actions = deterministic_train_actions
+        self.use_action_entropy = use_action_entropy
         self.critic_real_data_update_period = critic_real_data_update_period
         self.perturb_rate = perturb_rate
         if policy_update_period:
@@ -393,10 +545,17 @@ class MaxInfoOmbrlLearner(object):
     def sample_actions(self,
                        observations: np.ndarray,
                        temperature: float = 1.0) -> np.ndarray:
-        rng, actions = policies.sample_actions(self.rng, self.actor.apply_fn,
-                                               self.actor.params, observations,
-                                               temperature)
-        self.rng = rng
+        if self.deterministic_train_actions:
+            dist = self.actor.apply_fn({'params': self.actor.params}, observations)
+            if hasattr(dist, 'bijector') and hasattr(dist, 'distribution'):
+                actions = dist.bijector.forward(dist.distribution.mean())
+            else:
+                actions = dist.mean()
+        else:
+            rng, actions = policies.sample_actions(self.rng, self.actor.apply_fn,
+                                                   self.actor.params, observations,
+                                                   temperature)
+            self.rng = rng
 
         actions = np.asarray(actions)
         return np.clip(actions, -1, 1)
@@ -445,8 +604,11 @@ class MaxInfoOmbrlLearner(object):
             sample_model=self.sample_model,
             update_critic_with_real_data=self.step % self.critic_real_data_update_period == 0,
             update_policy=self.step % self.policy_update_period == 0,
+            internal_noise_std=self.internal_noise_std,
             dt=self.dt,
             action_repeat=self.action_repeat,
+            deterministic_policy=self.deterministic_policy,
+            use_action_entropy=self.use_action_entropy,
         )
 
         self.rng = new_rng

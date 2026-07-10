@@ -33,6 +33,8 @@ COMMON = {
     'eval_episodes': [10],
     'perturb_model': [1],
     'perturb_policy': [0],
+    'process_noise_std': [0.0],
+    'internal_noise_std': [0.0],
 }
 
 MBPO_OPTIMISTIC = {
@@ -47,6 +49,18 @@ MBPO_MEAN = {
     'sample_model': [0],
     'dyn_ent_lr': [0.0],
     'init_temperature_dyn_entropy': [1e-8],
+} | COMMON
+
+MBPO_GREEDY = {
+    'exp_hash': ['greedy'],
+    'sample_model': [0],
+    'dyn_ent_lr': [0.0],
+    'temp_lr': [0.0],
+    'init_temperature_dyn_entropy': [1e-8],
+    'init_temperature': [1e-8],
+    'deterministic_policy': [1],
+    'deterministic_train_actions': [1],
+    'use_action_entropy': [0],
 } | COMMON
 
 MOUNTAIN_CAR = {
@@ -158,7 +172,7 @@ def generate_run_commands(command_list, num_cpus=1, num_gpus=0, dry=False,
 def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY):
     flags = []
     for task in TASKS:
-        for alg in [MBPO_OPTIMISTIC, MBPO_MEAN]:
+        for alg in [MBPO_OPTIMISTIC, MBPO_MEAN, MBPO_GREEDY]:
             task_flags = task | alg
             task_flags['project_name'] = [project_name]
             task_flags['entity_name'] = [entity_name]

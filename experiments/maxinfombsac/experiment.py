@@ -1,5 +1,6 @@
 import numpy as np
 import argparse
+from typing import Optional
 from experiments.utils import hash_dict
 
 
@@ -12,6 +13,7 @@ def experiment(
         action_repeat: int = 1,
         ens_lr: float = 3e-4,
         dyn_ent_lr: float = 3e-4,
+        temp_lr: Optional[float] = None,
         num_neurons: int = 256,
         num_hidden_layers: int = 2,
         lr: float = 3e-4,
@@ -31,11 +33,17 @@ def experiment(
         eval_episodes: int = 10,
         exp_hash: str = '',
         sample_model: bool = False,
+        internal_noise_std: Optional[float] = None,
         critic_real_data_update_period: int = 2,
         use_bronet: bool = True,
+        init_temperature: float = 1.0,
         init_temperature_dyn_entropy: float = 1.0,
         perturb_policy: bool = True,
         perturb_model: bool = True,
+        deterministic_policy: bool = False,
+        deterministic_train_actions: bool = False,
+        use_action_entropy: bool = True,
+        process_noise_std: float = 0.0,
         pseudo_ct: bool = False,
         predict_diff: bool = True,
 ):
@@ -43,12 +51,15 @@ def experiment(
     
     env_kwargs = {'action_cost': action_cost,
                   'action_repeat': action_repeat,
+                  'process_noise_std': process_noise_std,
                   }
+    if temp_lr is None:
+        temp_lr = lr
 
     alg_kwargs = {
         'actor_lr': lr,
         'critic_lr': lr,
-        'temp_lr': lr,
+        'temp_lr': temp_lr,
         'hidden_dims': (num_neurons,) * num_hidden_layers,
         'discount': 0.99,
         'tau': 0.005,
@@ -56,6 +67,7 @@ def experiment(
         'target_entropy': None,
         'backup_entropy': True,
         'use_bronet': use_bronet,
+        'init_temperature': init_temperature,
     }
     max_gradient_norm = 0.5
     updates_per_step = 1
@@ -72,12 +84,16 @@ def experiment(
         alg_kwargs['model_hidden_dims'] = (num_neurons,) * num_hidden_layers
         if alg_name == 'maxinfombsac':
             alg_kwargs['sample_model'] = sample_model
+            alg_kwargs['internal_noise_std'] = internal_noise_std
             alg_kwargs['critic_real_data_update_period'] = critic_real_data_update_period
             alg_kwargs['max_gradient_norm'] = max_gradient_norm
             alg_kwargs['reset_models'] = reset_models
             alg_kwargs['reset_period'] = reset_period
             alg_kwargs['perturb_policy'] = perturb_policy
             alg_kwargs['perturb_model'] = perturb_model
+            alg_kwargs['deterministic_policy'] = deterministic_policy
+            alg_kwargs['deterministic_train_actions'] = deterministic_train_actions
+            alg_kwargs['use_action_entropy'] = use_action_entropy
             alg_kwargs['pseudo_ct'] = pseudo_ct
             alg_kwargs['predict_diff'] = predict_diff
             alg_kwargs['dt'] = None
@@ -96,6 +112,7 @@ def experiment(
         'ens_lr': ens_lr,
         'ens_wd': ens_wd,
         'lr': lr,
+        'temp_lr': temp_lr,
         'dyn_ent_lr': dyn_ent_lr,
         'dyn_wd': dyn_wd,
         'num_neurons': num_neurons,
@@ -104,14 +121,20 @@ def experiment(
         'env_name': env_name,
         'model_update_delay': model_update_delay,
         'sample_model': sample_model,
+        'internal_noise_std': internal_noise_std,
         'critic_real_data_update_period': critic_real_data_update_period,
         'use_bronet': use_bronet,
         'max_gradient_norm': max_gradient_norm,
+        'init_temperature': init_temperature,
         'init_temperature_dyn_entropy': init_temperature_dyn_entropy,
         'reset_models': reset_models,
         'reset_period': reset_period,
         'perturb_policy': perturb_policy,
         'perturb_model': perturb_model,
+        'deterministic_policy': deterministic_policy,
+        'deterministic_train_actions': deterministic_train_actions,
+        'use_action_entropy': use_action_entropy,
+        'process_noise_std': process_noise_std,
         'pseudo_ct': pseudo_ct,
         'predict_diff': predict_diff,
     }
@@ -161,6 +184,7 @@ def main(args):
         action_repeat=args.action_repeat,
         ens_lr=args.ens_lr,
         dyn_ent_lr=args.dyn_ent_lr,
+        temp_lr=args.temp_lr,
         num_neurons=args.num_neurons,
         num_hidden_layers=args.num_hidden_layers,
         lr=args.lr,
@@ -180,11 +204,17 @@ def main(args):
         eval_episodes=args.eval_episodes,
         exp_hash=args.exp_hash,
         sample_model=bool(args.sample_model),
+        internal_noise_std=args.internal_noise_std,
         critic_real_data_update_period=args.critic_real_data_update_period,
+        init_temperature=args.init_temperature,
         init_temperature_dyn_entropy=args.init_temperature_dyn_entropy,
         perturb_policy=bool(args.perturb_policy),
         perturb_model=bool(args.perturb_model),
+        deterministic_policy=bool(args.deterministic_policy),
+        deterministic_train_actions=bool(args.deterministic_train_actions),
+        use_action_entropy=bool(args.use_action_entropy),
         use_bronet=bool(args.use_bronet),
+        process_noise_std=args.process_noise_std,
         pseudo_ct=bool(args.pseudo_ct),
         predict_diff=bool(args.predict_diff),
     )
@@ -204,6 +234,7 @@ if __name__ == '__main__':
     parser.add_argument('--action_repeat', type=int, default=2)
     parser.add_argument('--ens_lr', type=float, default=3e-4)
     parser.add_argument('--dyn_ent_lr', type=float, default=3e-4)
+    parser.add_argument('--temp_lr', type=float, default=None)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--ens_wd', type=float, default=0.0)
     parser.add_argument('--dyn_wd', type=float, default=0.0)
@@ -221,11 +252,17 @@ if __name__ == '__main__':
     parser.add_argument('--eval_episodes', type=int, default=5)
     parser.add_argument('--exp_hash', type=str, default='maxinfombsac')
     parser.add_argument('--sample_model', type=int, default=0)
+    parser.add_argument('--internal_noise_std', type=float, default=None)
     parser.add_argument('--critic_real_data_update_period', type=int, default=2)
+    parser.add_argument('--init_temperature', type=float, default=1.0)
     parser.add_argument('--init_temperature_dyn_entropy', type=float, default=1.0)
     parser.add_argument('--perturb_policy', type=int, default=1)
     parser.add_argument('--perturb_model', type=int, default=1)
+    parser.add_argument('--deterministic_policy', type=int, default=0)
+    parser.add_argument('--deterministic_train_actions', type=int, default=0)
+    parser.add_argument('--use_action_entropy', type=int, default=1)
     parser.add_argument('--use_bronet', type=int, default=1)
+    parser.add_argument('--process_noise_std', type=float, default=0.0)
     parser.add_argument('--pseudo_ct', type=int, default=0)
     parser.add_argument('--predict_diff', type=int, default=1)
 
