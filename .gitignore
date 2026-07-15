@@ -224,3 +224,7 @@ logs
 tmp
 temp
 experiments/__init__.py
+
+# Plots
+plots/cache
+plots/*.pdf
