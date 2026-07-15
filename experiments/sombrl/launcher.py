@@ -170,13 +170,16 @@ def generate_run_commands(command_list, num_cpus=1, num_gpus=0, dry=False,
     raise NotImplementedError(f'Unsupported mode: {mode}')
 
 
-def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY):
+def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY, input_knowledge=False):
     flags = []
     for task in TASKS:
         for alg in [MBPO_OPTIMISTIC, MBPO_MEAN, MBPO_GREEDY]:
             task_flags = task | alg
             task_flags['project_name'] = [project_name]
             task_flags['entity_name'] = [entity_name]
+            task_flags['input_knowledge'] = [int(input_knowledge)]
+            if input_knowledge:
+                task_flags['exp_hash'] = [f"{task_flags['exp_hash'][0]}_input_knowledge"]
             flags.extend(dict_permutations(task_flags))
     return flags
 
@@ -216,7 +219,7 @@ def main(args):
     if args.euler_setup:
         setup_prefix = f'. {os.path.abspath(args.euler_setup)} && '
 
-    all_flags = build_flags(args.project_name, args.entity_name)
+    all_flags = build_flags(args.project_name, args.entity_name, args.input_knowledge)
     validate_experiment_flags(all_flags)
 
     for flags in all_flags:
@@ -253,4 +256,5 @@ if __name__ == '__main__':
     parser.add_argument('--euler_setup', type=str, default='utility_scripts/setup_sombrl_euler.bash')
     parser.add_argument('--dry_run', action='store_true')
     parser.add_argument('--yes', action='store_true')
+    parser.add_argument('--input_knowledge', action='store_true')
     main(parser.parse_args())

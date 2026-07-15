@@ -12,9 +12,10 @@ from tensorboardX import SummaryWriter
 # from jaxrl.agents import DDPGLearner, REDQLearner, SACLearner, DrQLearner
 from maxinforl_jax.agents import MaxInfoSacLearner
 from ombrl.agents import MaxInfoOmbrlLearner
-from jaxrl.datasets import ReplayBuffer
+from jaxrl.datasets import Batch, ReplayBuffer
 from maxinforl_jax.datasets import NstepReplayBuffer
 from ombrl.utils.wrappers import AdditiveGaussianProcessNoise, PendulumInitWrapper
+from ombrl.utils.input_priors import EnvStateAccessor, SimulatorStateBuffer, TrueInputEffect
 from jaxrl.evaluation import evaluate
 from jaxrl.utils import make_env
 import wandb
@@ -25,9 +26,60 @@ from gymnasium.wrappers.pixel_observation import PixelObservationWrapper
 from jaxrl import wrappers
 
 
+def _get_replay_size(replay_buffer) -> int:
+    for attr in ("size", "_size"):
+        if hasattr(replay_buffer, attr):
+            size = getattr(replay_buffer, attr)
+            return int(size() if callable(size) else size)
+    raise AttributeError("Replay buffer does not expose size/_size; cannot sample by index.")
+
+
+def _get_replay_insert_index(replay_buffer, fallback_index: int) -> int:
+    for attr in ("insert_index", "_insert_index"):
+        if hasattr(replay_buffer, attr):
+            index = getattr(replay_buffer, attr)
+            return int(index() if callable(index) else index)
+    return int(fallback_index)
+
+
+def _sample_replay_buffer_with_indices(replay_buffer, batch_size: int):
+    size = _get_replay_size(replay_buffer)
+    indices = np.random.randint(size, size=batch_size)
+    if hasattr(replay_buffer, "sample_jax"):
+        return replay_buffer.sample_jax(indices), indices
+    if hasattr(replay_buffer, "sample_parallel"):
+        return replay_buffer.sample_parallel(indices), indices
+    if hasattr(replay_buffer, "dataset_dict"):
+        dataset = replay_buffer.dataset_dict
+        batch_data = {
+            field: dataset[field][indices]
+            for field in Batch._fields
+            if field in dataset
+        }
+        return Batch(**batch_data), indices
+    if all(hasattr(replay_buffer, field) for field in Batch._fields):
+        return Batch(
+            observations=replay_buffer.observations[indices],
+            actions=replay_buffer.actions[indices],
+            rewards=replay_buffer.rewards[indices],
+            masks=replay_buffer.masks[indices],
+            next_observations=replay_buffer.next_observations[indices],
+        ), indices
+    raise AttributeError(
+        "Replay buffer does not expose sample_jax/sample_parallel; "
+        "cannot align sampled transitions with simulator states for input_knowledge=True."
+    )
+
+
 def add_process_noise(env, process_noise_std: float, seed: int):
     if process_noise_std > 0.0:
         return AdditiveGaussianProcessNoise(env, noise_std=process_noise_std, seed=seed)
+    return env
+
+
+def get_deterministic_prior_env(env):
+    if isinstance(env, AdditiveGaussianProcessNoise):
+        return env.env
     return env
 
 
@@ -203,6 +255,10 @@ def train(
     run_name = f"{env_name}__{alg_name}__{seed}__{int(time.time())}__{exp_hash}"
     env_kwargs = dict(env_kwargs)
     process_noise_std = float(env_kwargs.pop('process_noise_std', 0.0))
+    if alg_kwargs.get('input_knowledge', False) and n_steps_returns >= 0:
+        raise NotImplementedError(
+            "input_knowledge=True currently supports one-step replay buffers only."
+        )
 
     if save_video:
         video_train_folder = os.path.join(logs_dir, 'video', 'train')
@@ -284,8 +340,27 @@ def train(
         agent = MaxInfoOmbrlLearner(seed,
                                     env.observation_space.sample(),
                                     env.action_space.sample(), **alg_kwargs)
+        input_effect = (
+            TrueInputEffect(get_deterministic_prior_env(env), env.action_space)
+            if alg_kwargs.get('input_knowledge', False)
+            else None
+        )
+        simulator_state_buffer = (
+            SimulatorStateBuffer(replay_buffer_size or max_steps)
+            if alg_kwargs.get('input_knowledge', False)
+            else None
+        )
+        simulator_state_accessor = (
+            EnvStateAccessor(env)
+            if alg_kwargs.get('input_knowledge', False)
+            else None
+        )
     else:
         raise NotImplementedError()
+    if alg_name != 'maxinfombsac':
+        input_effect = None
+        simulator_state_buffer = None
+        simulator_state_accessor = None
     if n_steps_returns < 0:
         replay_buffer = ReplayBuffer(observation_space=env.observation_space,
                                      action_space=env.action_space,
@@ -310,6 +385,9 @@ def train(
             action = env.action_space.sample()
         else:
             action = agent.sample_actions(observation)
+        if simulator_state_buffer is not None:
+            replay_insert_index = _get_replay_insert_index(replay_buffer, i - 1)
+            simulator_state_buffer.insert(replay_insert_index, simulator_state_accessor.snapshot())
         next_observation, reward, terminate, truncate, info = env.step(action)
 
         if terminate:
@@ -340,8 +418,20 @@ def train(
 
         if i >= training_start:
             for _ in range(updates_per_step):
-                batch = replay_buffer.sample(batch_size)
-                update_info = agent.update(batch)
+                if input_effect is None:
+                    batch = replay_buffer.sample(batch_size)
+                    update_info = agent.update(batch)
+                else:
+                    batch, batch_indices = _sample_replay_buffer_with_indices(
+                        replay_buffer,
+                        batch_size,
+                    )
+                    known_input_effect = input_effect.batch_effect_from_states(
+                        simulator_state_buffer.get(batch_indices),
+                        batch.actions,
+                        batch.observations.shape[1:],
+                    )
+                    update_info = agent.update(batch, known_input_effect=known_input_effect)
 
             if i % log_interval == 0:
                 for k, v in update_info.items():

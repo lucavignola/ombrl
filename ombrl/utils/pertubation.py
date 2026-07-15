@@ -32,6 +32,7 @@ class PerturbationModule(object):
                  perturbation_freq: int = 2.5e6,
                  perturb_policy: bool = True,
                  perturb_model: bool = True,
+                 model_input_uses_actions: bool = True,
                  ):
         self._actor_init_fn = jax.jit(actor_init_fn)
         self._critic_init_fn = jax.jit(critic_init_fn)
@@ -42,12 +43,17 @@ class PerturbationModule(object):
         self.perturbation_freq = perturbation_freq
         self.perturb_policy = perturb_policy
         self.perturb_model = perturb_model
+        self.model_input_uses_actions = model_input_uses_actions
 
     def get_actor_init_params(self, rng: chex.Array, observation: chex.Array):
         return self._actor_init_fn(rng, observation)
 
     def get_model_init_params(self, rng: chex.Array, observation: chex.Array, action: chex.Array) -> EnsembleState:
-        return self._model_init_fn(key=rng, input=jnp.concatenate([observation, action], axis=-1))
+        if self.model_input_uses_actions:
+            model_input = jnp.concatenate([observation, action], axis=-1)
+        else:
+            model_input = observation
+        return self._model_init_fn(key=rng, input=model_input)
 
     def get_critic_init_params(self, rng: chex.Array, observation: chex.Array, action: chex.Array):
         return self._critic_init_fn(rng, observation, action)

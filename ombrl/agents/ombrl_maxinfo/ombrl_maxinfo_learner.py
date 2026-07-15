@@ -22,6 +22,8 @@ def get_imagined_batch(
         batch: Batch,
         ens: DeterministicEnsemble,
         ens_state: EnsembleState,
+        known_input_effect: Optional[jnp.ndarray],
+        input_knowledge: bool,
         predict_rewards: bool,
         predict_diff: bool,
         sample_model: bool,
@@ -31,7 +33,10 @@ def get_imagined_batch(
         dt: float = None,
         action_repeat: int = 1,
 ):
-    input = jnp.concatenate([batch.observations, batch.actions], axis=-1)
+    if input_knowledge:
+        input = batch.observations
+    else:
+        input = jnp.concatenate([batch.observations, batch.actions], axis=-1)
     ens_mean, ens_std = ens(input=input, state=ens_state, denormalize_output=True)
     noise_key, key = jax.random.split(key, 2)
     if sample_model:
@@ -63,6 +68,12 @@ def get_imagined_batch(
             next_state = next_state + batch.observations[jnp.newaxis]
         else:
             next_state = next_state + batch.observations
+
+    if input_knowledge:
+        if internal_noise_samples > 1:
+            next_state = next_state + known_input_effect[jnp.newaxis]
+        else:
+            next_state = next_state + known_input_effect
 
     if internal_noise_samples > 1:
         def repeat_batch_field(x):
@@ -99,6 +110,14 @@ def _policy_actions_and_log_probs(actor: Model,
     return actions, log_probs
 
 
+def _ensemble_input(observations: jnp.ndarray,
+                    actions: jnp.ndarray,
+                    input_knowledge: bool) -> jnp.ndarray:
+    if input_knowledge:
+        return observations
+    return jnp.concatenate([observations, actions], axis=-1)
+
+
 def update_actor_local(key: PRNGKey,
                        actor: Model,
                        critic: Model,
@@ -109,7 +128,8 @@ def update_actor_local(key: PRNGKey,
                        ens_state: EnsembleState,
                        batch: Batch,
                        deterministic_policy: bool,
-                       use_action_entropy: bool) -> Tuple[Model, EnsembleState, InfoDict]:
+                       use_action_entropy: bool,
+                       input_knowledge: bool) -> Tuple[Model, EnsembleState, InfoDict]:
     key, target_key = jax.random.split(key, 2)
 
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, Tuple[EnsembleState, InfoDict]]:
@@ -130,8 +150,8 @@ def update_actor_local(key: PRNGKey,
             key=target_key,
             deterministic_policy=deterministic_policy,
         )
-        target_inp = jnp.concatenate([batch.observations, target_actions], axis=-1)
-        inp = jnp.concatenate([batch.observations, actions], axis=-1)
+        target_inp = _ensemble_input(batch.observations, target_actions, input_knowledge)
+        inp = _ensemble_input(batch.observations, actions, input_knowledge)
         total_inp = jnp.concatenate([inp, target_inp], axis=0)
         info_gain, new_ens_state = ens.get_info_gain(input=total_inp,
                                                      state=ens_state,
@@ -167,7 +187,8 @@ def update_critic_local(key: PRNGKey,
                         discount: float,
                         backup_entropy: bool,
                         deterministic_policy: bool,
-                        use_action_entropy: bool) -> Tuple[Model, EnsembleState, InfoDict]:
+                        use_action_entropy: bool,
+                        input_knowledge: bool) -> Tuple[Model, EnsembleState, InfoDict]:
     next_actions, next_log_probs = _policy_actions_and_log_probs(
         actor=actor,
         actor_params=actor.params,
@@ -177,7 +198,7 @@ def update_critic_local(key: PRNGKey,
     )
 
     info_gain, new_ens_state = ens.get_info_gain(
-        input=jnp.concatenate([batch.next_observations, next_actions], axis=-1),
+        input=_ensemble_input(batch.next_observations, next_actions, input_knowledge),
         state=ens_state, update_normalizer=False)
 
     next_q1, next_q2 = target_critic(batch.next_observations, next_actions)
@@ -221,6 +242,7 @@ def update_critic_local(key: PRNGKey,
                                     'internal_noise_samples',
                                     'deterministic_policy',
                                     'use_action_entropy',
+                                    'input_knowledge',
                                     ))
 def _update_jit(
         rng: PRNGKey, actor: Model, critic: Model, target_actor: Model, target_critic: Model, temp: Model, # type: ignore
@@ -231,6 +253,7 @@ def _update_jit(
         sample_model: bool, update_critic_with_real_data: bool, update_policy: bool,
         internal_noise_std: float, internal_noise_samples: int, dt: float, action_repeat: int,
         deterministic_policy: bool, use_action_entropy: bool,
+        known_input_effect: Optional[jnp.ndarray], input_knowledge: bool,
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, Model, Model, EnsembleState, InfoDict]: # type: ignore
     rng, key = jax.random.split(rng)
     if update_critic_with_real_data:
@@ -248,6 +271,7 @@ def _update_jit(
             backup_entropy=backup_entropy,
             deterministic_policy=deterministic_policy,
             use_action_entropy=use_action_entropy,
+            input_knowledge=input_knowledge,
         )
     else:
         new_critic = critic
@@ -258,6 +282,8 @@ def _update_jit(
         batch=batch,
         ens_state=ens_state,
         ens=ens,
+        known_input_effect=known_input_effect,
+        input_knowledge=input_knowledge,
         predict_diff=predict_diff,
         predict_rewards=predict_rewards,
         sample_model=sample_model,
@@ -282,6 +308,7 @@ def _update_jit(
         backup_entropy=backup_entropy,
         deterministic_policy=deterministic_policy,
         use_action_entropy=use_action_entropy,
+        input_knowledge=input_knowledge,
     )
 
     imagined_critic_info = {f'imagined_critic_{key}': val for key, val in imagined_critic_info.items()}
@@ -304,6 +331,7 @@ def _update_jit(
                                                               batch=batch,
                                                               deterministic_policy=deterministic_policy,
                                                               use_action_entropy=use_action_entropy,
+                                                              input_knowledge=input_knowledge,
                                                               )
         if update_target:
             new_target_actor = target_update(new_actor, target_actor, tau)
@@ -325,14 +353,18 @@ def _update_jit(
 
     if predict_diff:
         outputs = batch.next_observations - batch.observations
+        if input_knowledge:
+            outputs = outputs - known_input_effect
         if dt is not None:
             outputs = outputs / (dt * action_repeat)
     else:
         outputs = batch.next_observations
+        if input_knowledge:
+            outputs = outputs - known_input_effect
     if predict_rewards:
         outputs = jnp.concatenate([outputs, batch.rewards.reshape(-1, 1)], axis=-1)
     new_ens_state, (loss, mse) = ens.update(
-        input=jnp.concatenate([batch.observations, batch.actions], axis=-1),
+        input=_ensemble_input(batch.observations, batch.actions, input_knowledge),
         output=outputs,
         state=ens_state,
     )
@@ -412,6 +444,7 @@ class MaxInfoOmbrlLearner(object):
                  pseudo_ct: bool = False,
                  dt: float = None,
                  action_repeat: int = None,
+                 input_knowledge: bool = False,
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -426,6 +459,7 @@ class MaxInfoOmbrlLearner(object):
         self.deterministic_policy = deterministic_policy
         self.deterministic_train_actions = deterministic_train_actions
         self.use_action_entropy = use_action_entropy
+        self.input_knowledge = input_knowledge
         self.critic_real_data_update_period = critic_real_data_update_period
         self.perturb_rate = perturb_rate
         if policy_update_period:
@@ -532,7 +566,11 @@ class MaxInfoOmbrlLearner(object):
             use_entropy_for_int_rew=False,  # return model epistemic uncertainty as the intrinsic rew
         )
 
-        ens_state = ensemble.init(key=model_key, input=jnp.concatenate([observations, actions], axis=-1))
+        if self.input_knowledge:
+            ensemble_init_input = observations
+        else:
+            ensemble_init_input = jnp.concatenate([observations, actions], axis=-1)
+        ens_state = ensemble.init(key=model_key, input=ensemble_init_input)
 
         self.perturb_module = PerturbationModule(
             actor_init_fn=actor_def.init,
@@ -544,6 +582,7 @@ class MaxInfoOmbrlLearner(object):
             perturbation_freq=self.reset_period,
             perturb_policy=perturb_policy,
             perturb_model=perturb_model,
+            model_input_uses_actions=not self.input_knowledge,
         )
 
         self.use_log_transform = use_log_transform
@@ -586,7 +625,12 @@ class MaxInfoOmbrlLearner(object):
         actions = np.asarray(actions)
         return np.clip(actions, -1, 1)
 
-    def update(self, batch: Batch) -> InfoDict:
+    def update(self, batch: Batch, known_input_effect: Optional[np.ndarray] = None) -> InfoDict:
+        if self.input_knowledge and known_input_effect is None:
+            raise ValueError("known_input_effect must be provided when input_knowledge=True")
+        if not self.input_knowledge:
+            known_input_effect = None
+
         if self._reset_models:
             rng, self.rng = jax.random.split(self.rng)
             actor, critic, target_actor, target_critic, new_ens_state = self.perturb_module.perturb(
@@ -636,6 +680,8 @@ class MaxInfoOmbrlLearner(object):
             action_repeat=self.action_repeat,
             deterministic_policy=self.deterministic_policy,
             use_action_entropy=self.use_action_entropy,
+            known_input_effect=known_input_effect,
+            input_knowledge=self.input_knowledge,
         )
 
         self.rng = new_rng

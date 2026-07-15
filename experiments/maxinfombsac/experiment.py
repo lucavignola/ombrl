@@ -47,6 +47,7 @@ def experiment(
         process_noise_std: float = 0.0,
         pseudo_ct: bool = False,
         predict_diff: bool = True,
+        input_knowledge: bool = False,
 ):
     from ombrl.utils.autotune_train_utils import train
     
@@ -98,6 +99,7 @@ def experiment(
             alg_kwargs['use_action_entropy'] = use_action_entropy
             alg_kwargs['pseudo_ct'] = pseudo_ct
             alg_kwargs['predict_diff'] = predict_diff
+            alg_kwargs['input_knowledge'] = input_knowledge
             alg_kwargs['dt'] = None
             alg_kwargs['action_repeat'] = env_kwargs.get('action_repeat', 1)
 
@@ -140,6 +142,7 @@ def experiment(
         'process_noise_std': process_noise_std,
         'pseudo_ct': pseudo_ct,
         'predict_diff': predict_diff,
+        'input_knowledge': input_knowledge,
     }
 
     train(
@@ -221,6 +224,7 @@ def main(args):
         process_noise_std=args.process_noise_std,
         pseudo_ct=bool(args.pseudo_ct),
         predict_diff=bool(args.predict_diff),
+        input_knowledge=bool(args.input_knowledge),
     )
 
 
@@ -270,6 +274,7 @@ if __name__ == '__main__':
     parser.add_argument('--process_noise_std', type=float, default=0.0)
     parser.add_argument('--pseudo_ct', type=int, default=0)
     parser.add_argument('--predict_diff', type=int, default=1)
+    parser.add_argument('--input_knowledge', type=int, default=0)
 
     parser.add_argument('--seed', type=int, default=0)
 
