@@ -33,8 +33,9 @@ COMMON = {
     'eval_episodes': [10],
     'perturb_model': [1],
     'perturb_policy': [0],
-    'process_noise_std': [0.0],
-    'internal_noise_std': [0.0],
+    'process_noise_std': [0],
+    'internal_noise_std': [0],
+    'internal_noise_samples': [1],
 }
 
 MBPO_OPTIMISTIC = {

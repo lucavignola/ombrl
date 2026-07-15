@@ -34,6 +34,7 @@ def experiment(
         exp_hash: str = '',
         sample_model: bool = False,
         internal_noise_std: Optional[float] = None,
+        internal_noise_samples: int = 1,
         critic_real_data_update_period: int = 2,
         use_bronet: bool = True,
         init_temperature: float = 1.0,
@@ -85,6 +86,7 @@ def experiment(
         if alg_name == 'maxinfombsac':
             alg_kwargs['sample_model'] = sample_model
             alg_kwargs['internal_noise_std'] = internal_noise_std
+            alg_kwargs['internal_noise_samples'] = internal_noise_samples
             alg_kwargs['critic_real_data_update_period'] = critic_real_data_update_period
             alg_kwargs['max_gradient_norm'] = max_gradient_norm
             alg_kwargs['reset_models'] = reset_models
@@ -122,6 +124,7 @@ def experiment(
         'model_update_delay': model_update_delay,
         'sample_model': sample_model,
         'internal_noise_std': internal_noise_std,
+        'internal_noise_samples': internal_noise_samples,
         'critic_real_data_update_period': critic_real_data_update_period,
         'use_bronet': use_bronet,
         'max_gradient_norm': max_gradient_norm,
@@ -205,6 +208,7 @@ def main(args):
         exp_hash=args.exp_hash,
         sample_model=bool(args.sample_model),
         internal_noise_std=args.internal_noise_std,
+        internal_noise_samples=args.internal_noise_samples,
         critic_real_data_update_period=args.critic_real_data_update_period,
         init_temperature=args.init_temperature,
         init_temperature_dyn_entropy=args.init_temperature_dyn_entropy,
@@ -253,6 +257,7 @@ if __name__ == '__main__':
     parser.add_argument('--exp_hash', type=str, default='maxinfombsac')
     parser.add_argument('--sample_model', type=int, default=0)
     parser.add_argument('--internal_noise_std', type=float, default=None)
+    parser.add_argument('--internal_noise_samples', type=int, default=1)
     parser.add_argument('--critic_real_data_update_period', type=int, default=2)
     parser.add_argument('--init_temperature', type=float, default=1.0)
     parser.add_argument('--init_temperature_dyn_entropy', type=float, default=1.0)

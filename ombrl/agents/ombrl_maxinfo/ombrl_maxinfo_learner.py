@@ -26,6 +26,7 @@ def get_imagined_batch(
         predict_diff: bool,
         sample_model: bool,
         internal_noise_std: float,
+        internal_noise_samples: int,
         key: PRNGKey, # type: ignore
         dt: float = None,
         action_repeat: int = 1,
@@ -48,14 +49,35 @@ def get_imagined_batch(
         jnp.ones_like(ens_std) * internal_noise_std,
         ens_std,
     )
-    next_state = ens_mean + jax.random.normal(noise_key, shape=ens_std.shape) * ens_std
+    if internal_noise_samples > 1:
+        noise_shape = (internal_noise_samples,) + ens_std.shape
+        next_state = ens_mean[jnp.newaxis] + jax.random.normal(noise_key, shape=noise_shape) * ens_std[jnp.newaxis]
+    else:
+        next_state = ens_mean + jax.random.normal(noise_key, shape=ens_std.shape) * ens_std
 
     if predict_diff:
         if dt is not None:
             # CT case: The ensemble predicts the derivative of the next_state
             next_state = next_state * dt * action_repeat
-        next_state = next_state + batch.observations
-    imagined_batch = batch._replace(next_observations=next_state)
+        if internal_noise_samples > 1:
+            next_state = next_state + batch.observations[jnp.newaxis]
+        else:
+            next_state = next_state + batch.observations
+
+    if internal_noise_samples > 1:
+        def repeat_batch_field(x):
+            repeated = jnp.repeat(x[jnp.newaxis], internal_noise_samples, axis=0)
+            return repeated.reshape((-1,) + x.shape[1:])
+
+        imagined_batch = batch._replace(
+            observations=repeat_batch_field(batch.observations),
+            actions=repeat_batch_field(batch.actions),
+            rewards=repeat_batch_field(batch.rewards),
+            masks=repeat_batch_field(batch.masks),
+            next_observations=next_state.reshape((-1,) + next_state.shape[2:]),
+        )
+    else:
+        imagined_batch = batch._replace(next_observations=next_state)
     return imagined_batch
 
 
@@ -196,6 +218,7 @@ def update_critic_local(key: PRNGKey,
                                     'sample_model',
                                     'update_critic_with_real_data',
                                     'update_policy',
+                                    'internal_noise_samples',
                                     'deterministic_policy',
                                     'use_action_entropy',
                                     ))
@@ -206,7 +229,7 @@ def _update_jit(
         target_entropy: float, backup_entropy: bool, update_target: bool,
         use_log_transform: bool, predict_rewards: bool, predict_diff: bool,
         sample_model: bool, update_critic_with_real_data: bool, update_policy: bool,
-        internal_noise_std: float, dt: float, action_repeat: int,
+        internal_noise_std: float, internal_noise_samples: int, dt: float, action_repeat: int,
         deterministic_policy: bool, use_action_entropy: bool,
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, Model, Model, EnsembleState, InfoDict]: # type: ignore
     rng, key = jax.random.split(rng)
@@ -239,6 +262,7 @@ def _update_jit(
         predict_rewards=predict_rewards,
         sample_model=sample_model,
         internal_noise_std=internal_noise_std,
+        internal_noise_samples=internal_noise_samples,
         key=model_sample_key,
         dt=dt,
         action_repeat=action_repeat,
@@ -372,6 +396,7 @@ class MaxInfoOmbrlLearner(object):
                  policy_final_fc_init_scale: float = 1.0,
                  sample_model: bool = True,
                  internal_noise_std: Optional[float] = None,
+                 internal_noise_samples: int = 1,
                  critic_real_data_update_period: int = 2,
                  policy_update_period: Optional[int] = None,
                  max_gradient_norm: Optional[float] = None,
@@ -397,6 +422,7 @@ class MaxInfoOmbrlLearner(object):
         self.num_heads = num_heads
         self.sample_model = sample_model
         self.internal_noise_std = -1.0 if internal_noise_std is None else internal_noise_std
+        self.internal_noise_samples = internal_noise_samples
         self.deterministic_policy = deterministic_policy
         self.deterministic_train_actions = deterministic_train_actions
         self.use_action_entropy = use_action_entropy
@@ -605,6 +631,7 @@ class MaxInfoOmbrlLearner(object):
             update_critic_with_real_data=self.step % self.critic_real_data_update_period == 0,
             update_policy=self.step % self.policy_update_period == 0,
             internal_noise_std=self.internal_noise_std,
+            internal_noise_samples=self.internal_noise_samples,
             dt=self.dt,
             action_repeat=self.action_repeat,
             deterministic_policy=self.deterministic_policy,
