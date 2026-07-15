@@ -172,13 +172,25 @@ def restore_env_state(env, state) -> None:
 class SimulatorStateBuffer:
     def __init__(self, capacity: int):
         self.capacity = int(capacity)
-        self.states = [None] * self.capacity
+        self.states = None
+        self._filled = np.zeros(self.capacity, dtype=bool)
 
     def insert(self, index: int, state) -> None:
-        self.states[int(index) % self.capacity] = state
+        slot = int(index) % self.capacity
+        state = np.asarray(state)
+        if self.states is None:
+            self.states = np.empty((self.capacity,) + state.shape, dtype=state.dtype)
+        elif self.states.shape[1:] != state.shape:
+            raise ValueError(
+                f"Simulator state shape changed from {self.states.shape[1:]} to {state.shape}."
+            )
+        self.states[slot] = state
+        self._filled[slot] = True
 
     def get(self, indices: np.ndarray):
-        sampled_states = [self.states[int(index) % self.capacity] for index in indices]
-        if any(state is None for state in sampled_states):
+        if self.states is None:
             raise RuntimeError("Sampled a replay entry before its simulator state was recorded.")
-        return sampled_states
+        slots = np.asarray(indices, dtype=np.int64) % self.capacity
+        if not np.all(self._filled[slots]):
+            raise RuntimeError("Sampled a replay entry before its simulator state was recorded.")
+        return self.states[slots]

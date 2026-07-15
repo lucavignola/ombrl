@@ -216,7 +216,7 @@ def main(args):
         logs_dir = os.path.abspath('./logs/sombrl_fig3_state/')
 
     setup_prefix = ''
-    if args.euler_setup:
+    if args.mode == 'euler' and args.euler_setup:
         setup_prefix = f'. {os.path.abspath(args.euler_setup)} && '
 
     all_flags = build_flags(args.project_name, args.entity_name, args.input_knowledge)

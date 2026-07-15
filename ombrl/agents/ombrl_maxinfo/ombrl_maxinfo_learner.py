@@ -607,6 +607,9 @@ class MaxInfoOmbrlLearner(object):
         self.dt = dt
         self.action_repeat = action_repeat
 
+    def _should_perturb(self) -> bool:
+        return self.step >= 1 and self.step % self.reset_period == 0
+
     def sample_actions(self,
                        observations: np.ndarray,
                        temperature: float = 1.0) -> np.ndarray:
@@ -633,22 +636,23 @@ class MaxInfoOmbrlLearner(object):
 
         if self._reset_models:
             rng, self.rng = jax.random.split(self.rng)
-            actor, critic, target_actor, target_critic, new_ens_state = self.perturb_module.perturb(
-                actor=self.actor,
-                critic=self.critic,
-                target_actor=self.target_actor,
-                target_critic=self.target_critic,
-                ens_state=self.ens_state,
-                observation=batch.observations,
-                action=batch.actions,
-                rng=rng,
-                step=self.step
-            )
-            self.actor = actor
-            self.target_actor = target_actor
-            self.critic = critic
-            self.target_critic = target_critic
-            self.ens_state = new_ens_state
+            if self._should_perturb():
+                actor, critic, target_actor, target_critic, new_ens_state = self.perturb_module.perturb(
+                    actor=self.actor,
+                    critic=self.critic,
+                    target_actor=self.target_actor,
+                    target_critic=self.target_critic,
+                    ens_state=self.ens_state,
+                    observation=batch.observations,
+                    action=batch.actions,
+                    rng=rng,
+                    step=self.step
+                )
+                self.actor = actor
+                self.target_actor = target_actor
+                self.critic = critic
+                self.target_critic = target_critic
+                self.ens_state = new_ens_state
 
         self.step += 1
         new_rng, new_actor, new_critic, new_target_actor, new_target_critic, \
