@@ -31,6 +31,13 @@ class AdditiveGaussianProcessNoise(Wrapper):
         super().__init__(env)
         self.noise_std = float(noise_std)
         self.rng = np.random.default_rng(seed)
+        self._clip_low = None
+        self._clip_high = None
+        space = self.observation_space
+        if isinstance(space, gym.spaces.Box):
+            if np.all(np.isfinite(space.low)) or np.all(np.isfinite(space.high)):
+                self._clip_low = space.low
+                self._clip_high = space.high
 
     def _add_noise(self, observation):
         if self.noise_std <= 0.0:
@@ -46,12 +53,8 @@ class AdditiveGaussianProcessNoise(Wrapper):
             size=observation.shape,
         ).astype(observation.dtype)
 
-        space = self.observation_space
-        if isinstance(space, gym.spaces.Box) and space.shape == noisy_observation.shape:
-            low = space.low
-            high = space.high
-            if np.all(np.isfinite(low)) or np.all(np.isfinite(high)):
-                noisy_observation = np.clip(noisy_observation, low, high)
+        if self._clip_low is not None and self.observation_space.shape == noisy_observation.shape:
+            noisy_observation = np.clip(noisy_observation, self._clip_low, self._clip_high)
         return noisy_observation.astype(observation.dtype, copy=False)
 
     def step(self, action):

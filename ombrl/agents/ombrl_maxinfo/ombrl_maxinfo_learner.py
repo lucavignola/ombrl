@@ -49,16 +49,32 @@ def get_imagined_batch(
     if predict_rewards:
         ens_mean = ens_mean[..., :-1]
         ens_std = ens_std[..., :-1]
-    ens_std = jnp.where(
-        internal_noise_std >= 0.0,
-        jnp.ones_like(ens_std) * internal_noise_std,
-        ens_std,
-    )
-    if internal_noise_samples > 1:
-        noise_shape = (internal_noise_samples,) + ens_std.shape
-        next_state = ens_mean[jnp.newaxis] + jax.random.normal(noise_key, shape=noise_shape) * ens_std[jnp.newaxis]
+
+    if internal_noise_std == 0.0:
+        if internal_noise_samples > 1:
+            next_state = jnp.broadcast_to(
+                ens_mean[jnp.newaxis],
+                (internal_noise_samples,) + ens_mean.shape,
+            )
+        else:
+            next_state = ens_mean
     else:
-        next_state = ens_mean + jax.random.normal(noise_key, shape=ens_std.shape) * ens_std
+        if internal_noise_std > 0.0:
+            if internal_noise_samples > 1:
+                noise_shape = (internal_noise_samples,) + ens_std.shape
+                next_state = ens_mean[jnp.newaxis] + jax.random.normal(
+                    noise_key, shape=noise_shape) * internal_noise_std
+            else:
+                next_state = ens_mean + jax.random.normal(
+                    noise_key, shape=ens_std.shape) * internal_noise_std
+        else:
+            if internal_noise_samples > 1:
+                noise_shape = (internal_noise_samples,) + ens_std.shape
+                next_state = ens_mean[jnp.newaxis] + jax.random.normal(
+                    noise_key, shape=noise_shape) * ens_std[jnp.newaxis]
+            else:
+                next_state = ens_mean + jax.random.normal(
+                    noise_key, shape=ens_std.shape) * ens_std
 
     if predict_diff:
         if dt is not None:
@@ -77,7 +93,10 @@ def get_imagined_batch(
 
     if internal_noise_samples > 1:
         def repeat_batch_field(x):
-            repeated = jnp.repeat(x[jnp.newaxis], internal_noise_samples, axis=0)
+            repeated = jnp.broadcast_to(
+                x[jnp.newaxis],
+                (internal_noise_samples,) + x.shape,
+            )
             return repeated.reshape((-1,) + x.shape[1:])
 
         imagined_batch = batch._replace(
@@ -249,6 +268,7 @@ def update_critic_local(key: PRNGKey,
                                     'sample_model',
                                     'update_critic_with_real_data',
                                     'update_policy',
+                                    'internal_noise_std',
                                     'internal_noise_samples',
                                     'deterministic_policy',
                                     'use_action_entropy',

@@ -194,3 +194,65 @@ class SimulatorStateBuffer:
         if not np.all(self._filled[slots]):
             raise RuntimeError("Sampled a replay entry before its simulator state was recorded.")
         return self.states[slots]
+
+
+class InputEffectCache:
+    def __init__(self, capacity: int):
+        self.capacity = int(capacity)
+        self.effects = None
+        self._valid = np.zeros(self.capacity, dtype=bool)
+
+    def invalidate(self, index: int) -> None:
+        self._valid[int(index) % self.capacity] = False
+
+    def insert(self, index: int, effect: np.ndarray) -> None:
+        slot = int(index) % self.capacity
+        effect = np.asarray(effect, dtype=np.float32)
+        if self.effects is None:
+            self.effects = np.empty((self.capacity,) + effect.shape, dtype=np.float32)
+        elif self.effects.shape[1:] != effect.shape:
+            raise ValueError(
+                f"Input effect shape changed from {self.effects.shape[1:]} to {effect.shape}."
+            )
+        self.effects[slot] = effect
+        self._valid[slot] = True
+
+    def get(self, indices: np.ndarray) -> np.ndarray:
+        if self.effects is None:
+            raise RuntimeError("Sampled an input effect before it was cached.")
+        slots = np.asarray(indices, dtype=np.int64) % self.capacity
+        if not np.all(self._valid[slots]):
+            raise RuntimeError("Sampled an input effect before it was cached.")
+        return self.effects[slots]
+
+    def get_or_compute(self,
+                       indices: np.ndarray,
+                       states: np.ndarray,
+                       actions: np.ndarray,
+                       observation_shape,
+                       input_effect: TrueInputEffect) -> np.ndarray:
+        slots = np.asarray(indices, dtype=np.int64) % self.capacity
+        actions = np.asarray(actions)
+        effect_shape = tuple(observation_shape)
+        if self.effects is None:
+            self.effects = np.empty(
+                (self.capacity,) + effect_shape,
+                dtype=np.float32,
+            )
+
+        missing_mask = ~self._valid[slots]
+        if np.any(missing_mask):
+            missing_positions = np.flatnonzero(missing_mask)
+            missing_slots = slots[missing_positions]
+            _, first_missing = np.unique(missing_slots, return_index=True)
+            compute_positions = missing_positions[np.sort(first_missing)]
+            computed_effects = input_effect.batch_effect_from_states(
+                states[compute_positions],
+                actions[compute_positions],
+                effect_shape,
+            )
+            compute_slots = slots[compute_positions]
+            self.effects[compute_slots] = computed_effects
+            self._valid[compute_slots] = True
+
+        return self.effects[slots]

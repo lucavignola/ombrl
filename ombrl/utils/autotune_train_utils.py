@@ -15,7 +15,7 @@ from ombrl.agents import MaxInfoOmbrlLearner
 from jaxrl.datasets import Batch, ReplayBuffer
 from maxinforl_jax.datasets import NstepReplayBuffer
 from ombrl.utils.wrappers import AdditiveGaussianProcessNoise, PendulumInitWrapper
-from ombrl.utils.input_priors import EnvStateAccessor, SimulatorStateBuffer, TrueInputEffect
+from ombrl.utils.input_priors import EnvStateAccessor, InputEffectCache, SimulatorStateBuffer, TrueInputEffect
 from jaxrl.evaluation import evaluate
 from jaxrl.utils import make_env
 import wandb
@@ -260,6 +260,8 @@ def train(
             "input_knowledge=True currently supports one-step replay buffers only."
         )
 
+    input_knowledge = alg_kwargs.get('input_knowledge', False)
+
     if save_video:
         video_train_folder = os.path.join(logs_dir, 'video', 'train')
         video_eval_folder = os.path.join(logs_dir, 'video', 'eval')
@@ -267,6 +269,7 @@ def train(
         video_train_folder = None
         video_eval_folder = None
 
+    prior_env = None
     if 'humanoid_bench' in env_name:
         _, task_name = env_name.split('/')
         env = make_humanoid_bench_env(env_name=task_name, seed=seed,
@@ -278,6 +281,11 @@ def train(
                                            recording_image_size=recording_image_size,
                                            episode_trigger=eval_episode_trigger,
                                            **env_kwargs)
+        if input_knowledge:
+            prior_env = make_humanoid_bench_env(env_name=task_name, seed=seed + 4242,
+                                                save_folder=None,
+                                                recording_image_size=None,
+                                                **env_kwargs)
         env = add_process_noise(env, process_noise_std, seed)
         eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
     elif 'metaworld' in env_name:
@@ -285,6 +293,9 @@ def train(
         env = make_metaworld_env(env_name=task_name, seed=seed, save_folder=video_train_folder, **env_kwargs)
         eval_env = make_metaworld_env(env_name=task_name, seed=seed + 42,
                                       save_folder=video_eval_folder, **env_kwargs)
+        if input_knowledge:
+            prior_env = make_metaworld_env(env_name=task_name, seed=seed + 4242,
+                                           save_folder=None, **env_kwargs)
         env = add_process_noise(env, process_noise_std, seed)
         eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
     else:
@@ -297,14 +308,23 @@ def train(
                             episode_trigger=eval_episode_trigger,
                             recording_image_size=recording_image_size,
                             **env_kwargs)
+        if input_knowledge:
+            prior_env = make_env(env_name=env_name, seed=seed + 4242,
+                                 save_folder=None,
+                                 recording_image_size=None,
+                                 **env_kwargs)
         if 'Pendulum' in env_name and exp_hash=='SwingUp':
             # HACK for Pendulum
             env = PendulumInitWrapper(env, init_angle=np.pi, init_vel=0.0)
             eval_env = PendulumInitWrapper(env, init_angle=np.pi, init_vel=0.0)
+            if prior_env is not None:
+                prior_env = PendulumInitWrapper(prior_env, init_angle=np.pi, init_vel=0.0)
         elif 'Pendulum' in env_name and exp_hash=='KeepUp':
             # HACK for Pendulum
             env = PendulumInitWrapper(env, init_angle=0.0, init_vel=0.0)
             eval_env = PendulumInitWrapper(env, init_angle=0.0, init_vel=0.0)
+            if prior_env is not None:
+                prior_env = PendulumInitWrapper(prior_env, init_angle=0.0, init_vel=0.0)
         env = add_process_noise(env, process_noise_std, seed)
         eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
 
@@ -337,28 +357,35 @@ def train(
                                   env.observation_space.sample(),
                                   env.action_space.sample(), **alg_kwargs)
     elif alg_name == 'maxinfombsac':
+        cache_input_effects = alg_kwargs.pop('cache_input_effects', True)
         agent = MaxInfoOmbrlLearner(seed,
                                     env.observation_space.sample(),
                                     env.action_space.sample(), **alg_kwargs)
         input_effect = (
-            TrueInputEffect(get_deterministic_prior_env(env), env.action_space)
-            if alg_kwargs.get('input_knowledge', False)
+            TrueInputEffect(prior_env, env.action_space, preserve_state=False)
+            if input_knowledge
+            else None
+        )
+        input_effect_cache = (
+            InputEffectCache(replay_buffer_size or max_steps)
+            if input_knowledge and cache_input_effects
             else None
         )
         simulator_state_buffer = (
             SimulatorStateBuffer(replay_buffer_size or max_steps)
-            if alg_kwargs.get('input_knowledge', False)
+            if input_knowledge and input_effect_cache is None
             else None
         )
         simulator_state_accessor = (
             EnvStateAccessor(env)
-            if alg_kwargs.get('input_knowledge', False)
+            if input_knowledge
             else None
         )
     else:
         raise NotImplementedError()
     if alg_name != 'maxinfombsac':
         input_effect = None
+        input_effect_cache = None
         simulator_state_buffer = None
         simulator_state_accessor = None
     if n_steps_returns < 0:
@@ -388,6 +415,13 @@ def train(
         if simulator_state_buffer is not None:
             replay_insert_index = _get_replay_insert_index(replay_buffer, i - 1)
             simulator_state_buffer.insert(replay_insert_index, simulator_state_accessor.snapshot())
+        elif input_effect_cache is not None:
+            replay_insert_index = _get_replay_insert_index(replay_buffer, i - 1)
+            simulator_state = simulator_state_accessor.snapshot()
+            input_effect_cache.insert(
+                replay_insert_index,
+                input_effect.effect_from_state(simulator_state, action),
+            )
         next_observation, reward, terminate, truncate, info = env.step(action)
 
         if terminate:
@@ -426,11 +460,15 @@ def train(
                         replay_buffer,
                         batch_size,
                     )
-                    known_input_effect = input_effect.batch_effect_from_states(
-                        simulator_state_buffer.get(batch_indices),
-                        batch.actions,
-                        batch.observations.shape[1:],
-                    )
+                    if input_effect_cache is not None:
+                        known_input_effect = input_effect_cache.get(batch_indices)
+                    else:
+                        simulator_states = simulator_state_buffer.get(batch_indices)
+                        known_input_effect = input_effect.batch_effect_from_states(
+                            simulator_states,
+                            batch.actions,
+                            batch.observations.shape[1:],
+                        )
                     update_info = agent.update(batch, known_input_effect=known_input_effect)
 
             if i % log_interval == 0:
