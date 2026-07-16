@@ -110,6 +110,16 @@ def _policy_actions_and_log_probs(actor: Model,
     return actions, log_probs
 
 
+@functools.partial(jax.jit, static_argnames=('actor_apply_fn',))
+def _deterministic_policy_actions(actor_apply_fn,
+                                  actor_params: Params,
+                                  observations: np.ndarray) -> jnp.ndarray:
+    dist = actor_apply_fn({'params': actor_params}, observations)
+    if hasattr(dist, 'bijector') and hasattr(dist, 'distribution'):
+        return dist.bijector.forward(dist.distribution.mean())
+    return dist.mean()
+
+
 def _ensemble_input(observations: jnp.ndarray,
                     actions: jnp.ndarray,
                     input_knowledge: bool) -> jnp.ndarray:
@@ -614,11 +624,11 @@ class MaxInfoOmbrlLearner(object):
                        observations: np.ndarray,
                        temperature: float = 1.0) -> np.ndarray:
         if self.deterministic_train_actions:
-            dist = self.actor.apply_fn({'params': self.actor.params}, observations)
-            if hasattr(dist, 'bijector') and hasattr(dist, 'distribution'):
-                actions = dist.bijector.forward(dist.distribution.mean())
-            else:
-                actions = dist.mean()
+            actions = _deterministic_policy_actions(
+                self.actor.apply_fn,
+                self.actor.params,
+                observations,
+            )
         else:
             rng, actions = policies.sample_actions(self.rng, self.actor.apply_fn,
                                                    self.actor.params, observations,
