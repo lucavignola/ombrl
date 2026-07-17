@@ -393,6 +393,20 @@ def _update_jit(
             outputs = outputs - known_input_effect
     if predict_rewards:
         outputs = jnp.concatenate([outputs, batch.rewards.reshape(-1, 1)], axis=-1)
+
+    prior_info = {}
+    if input_knowledge:
+        if internal_noise_samples > 1:
+            imagined_next = imagined_batch.next_observations[:batch.observations.shape[0]]
+        else:
+            imagined_next = imagined_batch.next_observations
+        prior_info = {
+            'input_prior_effect_rms': jnp.sqrt(jnp.mean(jnp.square(known_input_effect))),
+            'input_prior_residual_rms': jnp.sqrt(jnp.mean(jnp.square(outputs))),
+            'input_prior_one_step_rmse': jnp.sqrt(jnp.mean(jnp.square(
+                imagined_next - batch.next_observations))),
+        }
+
     new_ens_state, (loss, mse) = ens.update(
         input=_ensemble_input(batch.observations, batch.actions, input_knowledge),
         output=outputs,
@@ -409,6 +423,7 @@ def _update_jit(
                 'ens_info_gain_mean': ens_state.ensemble_normalizer_state.info_gain_normalizer_state.mean.mean(),
                 'ens_info_gain_std': ens_state.ensemble_normalizer_state.info_gain_normalizer_state.std.mean(),
                 # 'ens_info_gain_num_points': ens_state.ensemble_normalizer_state.info_gain_normalizer_state.num_points,
+                **prior_info,
                 }
 
     return rng, \
@@ -480,7 +495,11 @@ class MaxInfoOmbrlLearner(object):
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
         """
 
-        self.predict_reward = predict_reward
+        self.input_knowledge = input_knowledge
+        # Rewards in these tasks depend on the action-driven next state. They
+        # cannot be learned by the state-only prior model and are not used to
+        # construct imagined batches, so omit that otherwise impossible head.
+        self.predict_reward = predict_reward and not input_knowledge
         self.predict_diff = predict_diff
         self.num_heads = num_heads
         self.sample_model = sample_model
@@ -489,7 +508,6 @@ class MaxInfoOmbrlLearner(object):
         self.deterministic_policy = deterministic_policy
         self.deterministic_train_actions = deterministic_train_actions
         self.use_action_entropy = use_action_entropy
-        self.input_knowledge = input_knowledge
         self.critic_real_data_update_period = critic_real_data_update_period
         self.perturb_rate = perturb_rate
         if policy_update_period:
@@ -582,7 +600,7 @@ class MaxInfoOmbrlLearner(object):
         model_key, rng = jax.random.split(rng, 2)
 
         output_dim = observations.shape[-1]
-        if predict_reward:
+        if self.predict_reward:
             output_dim += 1
 
         if learn_std:

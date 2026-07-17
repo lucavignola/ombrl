@@ -43,6 +43,42 @@ class EnvStateAccessor:
         self.base_env.state = state.copy()
 
 
+class _EnvStepStateAccessor:
+    """Snapshot counters that can change the result of a simulator step."""
+
+    _COUNTER_ATTRIBUTES = ("_elapsed_steps", "_step_count", "_reset_next_step")
+
+    def __init__(self, env):
+        objects = []
+        current = env
+        while current is not None:
+            objects.append(current)
+            current = getattr(current, "env", None)
+
+        # jaxrl's DMCEnv delegates to dm_control.rl.control.Environment. Its
+        # time-limit state is not part of physics.get_state().
+        control_env = getattr(env.unwrapped, "_env", None)
+        if control_env is not None:
+            objects.append(control_env)
+
+        self._attributes = []
+        seen = set()
+        for obj in objects:
+            for attribute in self._COUNTER_ATTRIBUTES:
+                key = (id(obj), attribute)
+                if key not in seen and hasattr(obj, attribute):
+                    self._attributes.append((obj, attribute))
+                    seen.add(key)
+
+    def snapshot(self):
+        return tuple(getattr(obj, attribute)
+                     for obj, attribute in self._attributes)
+
+    def restore(self, state) -> None:
+        for (obj, attribute), value in zip(self._attributes, state):
+            setattr(obj, attribute, value)
+
+
 class TrueInputEffect:
     """Estimate F(x, u) - F(x, 0) from a simulator with restorable state."""
 
@@ -51,6 +87,8 @@ class TrueInputEffect:
         self.zero_action = np.zeros(action_space.shape, dtype=action_space.dtype)
         self.preserve_state = preserve_state
         self.state_accessor = EnvStateAccessor(self.env)
+        self.step_state_accessor = _EnvStepStateAccessor(self.env)
+        self._branch_step_state = self.step_state_accessor.snapshot()
 
     def batch_effect(self, observations: np.ndarray, actions: np.ndarray) -> np.ndarray:
         observations = np.asarray(observations)
@@ -67,25 +105,35 @@ class TrueInputEffect:
         step = self.env.step
         zero_action = self.zero_action
         current_state = self.state_accessor.snapshot() if self.preserve_state else None
+        current_step_state = self.step_state_accessor.snapshot() if self.preserve_state else None
         try:
             for idx, (state, action) in enumerate(zip(states, actions)):
-                restore(state)
+                self._restore_branch_state(state)
                 next_with_action = step(action)[0]
-                restore(state)
+                self._restore_branch_state(state)
                 next_with_zero_action = step(zero_action)[0]
                 effects[idx] = next_with_action - next_with_zero_action
         finally:
             if current_state is not None:
                 restore(current_state)
+                self.step_state_accessor.restore(current_step_state)
         return effects
 
     def effect_from_state(self, state, action: np.ndarray) -> np.ndarray:
-        next_with_action = self._next_observation_from_state(state, action)
-        next_with_zero_action = self._next_observation_from_state(state, self.zero_action)
-        return next_with_action - next_with_zero_action
+        current_state = self.state_accessor.snapshot() if self.preserve_state else None
+        current_step_state = self.step_state_accessor.snapshot() if self.preserve_state else None
+        try:
+            next_with_action = self._next_observation_from_state(state, action)
+            next_with_zero_action = self._next_observation_from_state(state, self.zero_action)
+            return next_with_action - next_with_zero_action
+        finally:
+            if current_state is not None:
+                self.state_accessor.restore(current_state)
+                self.step_state_accessor.restore(current_step_state)
 
     def effect(self, observation: np.ndarray, action: np.ndarray) -> np.ndarray:
         current_state = self.state_accessor.snapshot() if self.preserve_state else None
+        current_step_state = self.step_state_accessor.snapshot() if self.preserve_state else None
         try:
             next_with_action = self._next_observation(observation, action)
             next_with_zero_action = self._next_observation(observation, self.zero_action)
@@ -93,19 +141,25 @@ class TrueInputEffect:
         finally:
             if current_state is not None:
                 self.state_accessor.restore(current_state)
+                self.step_state_accessor.restore(current_step_state)
 
     def snapshot_state(self):
         return self.state_accessor.snapshot()
 
     def _next_observation_from_state(self, state, action: np.ndarray) -> np.ndarray:
-        self.state_accessor.restore(state)
+        self._restore_branch_state(state)
         next_observation, *_ = self.env.step(action)
         return np.asarray(next_observation, dtype=np.float32)
 
     def _next_observation(self, observation: np.ndarray, action: np.ndarray) -> np.ndarray:
         self._set_state_from_observation(observation)
+        self.step_state_accessor.restore(self._branch_step_state)
         next_observation, *_ = self.env.step(action)
         return np.asarray(next_observation, dtype=observation.dtype)
+
+    def _restore_branch_state(self, state) -> None:
+        self.state_accessor.restore(state)
+        self.step_state_accessor.restore(self._branch_step_state)
 
     def _set_state_from_observation(self, observation: np.ndarray) -> None:
         observation = np.asarray(observation)
