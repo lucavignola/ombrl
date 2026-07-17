@@ -158,6 +158,7 @@ def update_actor_local(key: PRNGKey,
                        batch: Batch,
                        deterministic_policy: bool,
                        use_action_entropy: bool,
+                       use_dynamics_entropy: bool,
                        input_knowledge: bool) -> Tuple[Model, EnsembleState, InfoDict]:
     key, target_key = jax.random.split(key, 2)
 
@@ -172,24 +173,32 @@ def update_actor_local(key: PRNGKey,
         q1, q2 = critic(batch.observations, actions)
         q = jnp.minimum(q1, q2)
 
-        target_actions, _ = _policy_actions_and_log_probs(
-            actor=target_actor,
-            actor_params=target_actor.params,
-            observations=batch.observations,
-            key=target_key,
-            deterministic_policy=deterministic_policy,
-        )
-        target_inp = _ensemble_input(batch.observations, target_actions, input_knowledge)
-        inp = _ensemble_input(batch.observations, actions, input_knowledge)
-        total_inp = jnp.concatenate([inp, target_inp], axis=0)
-        info_gain, new_ens_state = ens.get_info_gain(input=total_inp,
-                                                     state=ens_state,
-                                                     update_normalizer=True)
-        info_gain, target_info_gain = info_gain[:actions.shape[0]], info_gain[actions.shape[0]:]
-        dyn_ent_coef, _ = dyn_entropy_temp()
-        act_ent_coef, _ = temp()
-        total_entropy = dyn_ent_coef * info_gain
+        if use_dynamics_entropy:
+            target_actions, _ = _policy_actions_and_log_probs(
+                actor=target_actor,
+                actor_params=target_actor.params,
+                observations=batch.observations,
+                key=target_key,
+                deterministic_policy=deterministic_policy,
+            )
+            target_inp = _ensemble_input(batch.observations, target_actions, input_knowledge)
+            inp = _ensemble_input(batch.observations, actions, input_knowledge)
+            total_inp = jnp.concatenate([inp, target_inp], axis=0)
+            info_gain, new_ens_state = ens.get_info_gain(input=total_inp,
+                                                         state=ens_state,
+                                                         update_normalizer=True)
+            info_gain, target_info_gain = info_gain[:actions.shape[0]], info_gain[actions.shape[0]:]
+            dyn_ent_coef, _ = dyn_entropy_temp()
+            dynamics_entropy = dyn_ent_coef * info_gain
+        else:
+            info_gain = jnp.zeros_like(q)
+            target_info_gain = jnp.zeros_like(q)
+            dynamics_entropy = jnp.zeros_like(q)
+            new_ens_state = ens_state
+
+        total_entropy = dynamics_entropy
         if use_action_entropy:
+            act_ent_coef, _ = temp()
             total_entropy = total_entropy - act_ent_coef * log_probs
         actor_loss = -(total_entropy + q).mean()
         return actor_loss, (new_ens_state, {
@@ -197,6 +206,7 @@ def update_actor_local(key: PRNGKey,
             'entropy': -log_probs.mean(),
             'info_gain': info_gain.mean(),
             'target_info_gain': target_info_gain.mean(),
+            'dynamics_entropy_bonus': dynamics_entropy.mean(),
         })
 
     new_actor, (new_ens_state, info) = actor.apply_gradient(actor_loss_fn)
@@ -217,6 +227,7 @@ def update_critic_local(key: PRNGKey,
                         backup_entropy: bool,
                         deterministic_policy: bool,
                         use_action_entropy: bool,
+                        use_dynamics_entropy: bool,
                         input_knowledge: bool) -> Tuple[Model, EnsembleState, InfoDict]:
     next_actions, next_log_probs = _policy_actions_and_log_probs(
         actor=actor,
@@ -226,9 +237,13 @@ def update_critic_local(key: PRNGKey,
         deterministic_policy=deterministic_policy,
     )
 
-    info_gain, new_ens_state = ens.get_info_gain(
-        input=_ensemble_input(batch.next_observations, next_actions, input_knowledge),
-        state=ens_state, update_normalizer=False)
+    if use_dynamics_entropy:
+        info_gain, new_ens_state = ens.get_info_gain(
+            input=_ensemble_input(batch.next_observations, next_actions, input_knowledge),
+            state=ens_state, update_normalizer=False)
+    else:
+        info_gain = jnp.zeros_like(batch.rewards)
+        new_ens_state = ens_state
 
     next_q1, next_q2 = target_critic(batch.next_observations, next_actions)
     next_q = jnp.minimum(next_q1, next_q2)
@@ -236,10 +251,12 @@ def update_critic_local(key: PRNGKey,
     target_q = batch.rewards + discount * batch.masks * next_q
 
     if backup_entropy:
-        dyn_ent_coef, _ = dyn_entropy_temp()
-        act_ent_coef, _ = temp()
-        total_entropy = dyn_ent_coef * info_gain
+        total_entropy = jnp.zeros_like(target_q)
+        if use_dynamics_entropy:
+            dyn_ent_coef, _ = dyn_entropy_temp()
+            total_entropy = total_entropy + dyn_ent_coef * info_gain
         if use_action_entropy:
+            act_ent_coef, _ = temp()
             total_entropy = total_entropy - act_ent_coef * next_log_probs
         target_q += discount * batch.masks * total_entropy
 
@@ -272,6 +289,7 @@ def update_critic_local(key: PRNGKey,
                                     'internal_noise_samples',
                                     'deterministic_policy',
                                     'use_action_entropy',
+                                    'use_dynamics_entropy',
                                     'input_knowledge',
                                     ))
 def _update_jit(
@@ -282,7 +300,7 @@ def _update_jit(
         use_log_transform: bool, predict_rewards: bool, predict_diff: bool,
         sample_model: bool, update_critic_with_real_data: bool, update_policy: bool,
         internal_noise_std: float, internal_noise_samples: int, dt: float, action_repeat: int,
-        deterministic_policy: bool, use_action_entropy: bool,
+        deterministic_policy: bool, use_action_entropy: bool, use_dynamics_entropy: bool,
         known_input_effect: Optional[jnp.ndarray], input_knowledge: bool,
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, Model, Model, EnsembleState, InfoDict]: # type: ignore
     rng, key = jax.random.split(rng)
@@ -301,6 +319,7 @@ def _update_jit(
             backup_entropy=backup_entropy,
             deterministic_policy=deterministic_policy,
             use_action_entropy=use_action_entropy,
+            use_dynamics_entropy=use_dynamics_entropy,
             input_knowledge=input_knowledge,
         )
     else:
@@ -338,6 +357,7 @@ def _update_jit(
         backup_entropy=backup_entropy,
         deterministic_policy=deterministic_policy,
         use_action_entropy=use_action_entropy,
+        use_dynamics_entropy=use_dynamics_entropy,
         input_knowledge=input_knowledge,
     )
 
@@ -361,6 +381,7 @@ def _update_jit(
                                                               batch=batch,
                                                               deterministic_policy=deterministic_policy,
                                                               use_action_entropy=use_action_entropy,
+                                                              use_dynamics_entropy=use_dynamics_entropy,
                                                               input_knowledge=input_knowledge,
                                                               )
         if update_target:
@@ -373,10 +394,16 @@ def _update_jit(
                                                target_entropy, use_log_transform=use_log_transform)
         else:
             new_temp, alpha_info = temp, {}
-        new_dyn_entropy_temp, dyn_ent_info = update_temp(dyn_entropy_temp, actor_info['info_gain'],
-                                                         actor_info['target_info_gain'],
-                                                         use_log_transform=use_log_transform)
-        dyn_ent_info = {f'dyn_ent_{key}': val for key, val in dyn_ent_info.items()}
+        if use_dynamics_entropy:
+            new_dyn_entropy_temp, dyn_ent_info = update_temp(
+                dyn_entropy_temp,
+                actor_info['info_gain'],
+                actor_info['target_info_gain'],
+                use_log_transform=use_log_transform,
+            )
+            dyn_ent_info = {f'dyn_ent_{key}': val for key, val in dyn_ent_info.items()}
+        else:
+            new_dyn_entropy_temp, dyn_ent_info = dyn_entropy_temp, {}
     else:
         new_actor, new_temp, new_dyn_entropy_temp, new_target_actor = actor, temp, dyn_entropy_temp, target_actor
         actor_info, alpha_info, dyn_ent_info = {}, {}, {}
@@ -394,17 +421,32 @@ def _update_jit(
     if predict_rewards:
         outputs = jnp.concatenate([outputs, batch.rewards.reshape(-1, 1)], axis=-1)
 
+    if internal_noise_samples > 1:
+        imagined_next = imagined_batch.next_observations[:batch.observations.shape[0]]
+    else:
+        imagined_next = imagined_batch.next_observations
+    one_step_error = imagined_next - batch.next_observations
+    transition_rms = jnp.sqrt(jnp.mean(jnp.square(
+        batch.next_observations - batch.observations)))
+    output_std = ens_state.ensemble_normalizer_state.output_normalizer_state.std
+    output_std = output_std[:batch.observations.shape[-1]]
+    if predict_diff and dt is not None:
+        output_std = output_std * dt * action_repeat
+    model_info = {
+        'model_one_step_rmse': jnp.sqrt(jnp.mean(jnp.square(one_step_error))),
+        'model_one_step_relative_rmse': jnp.sqrt(jnp.mean(jnp.square(one_step_error))) /
+                                        jnp.maximum(transition_rms, 1e-6),
+        'model_one_step_normalized_rmse': jnp.sqrt(jnp.mean(jnp.square(
+            one_step_error / jnp.maximum(output_std, 1e-3)))),
+        'model_transition_rms': transition_rms,
+    }
+
     prior_info = {}
     if input_knowledge:
-        if internal_noise_samples > 1:
-            imagined_next = imagined_batch.next_observations[:batch.observations.shape[0]]
-        else:
-            imagined_next = imagined_batch.next_observations
         prior_info = {
             'input_prior_effect_rms': jnp.sqrt(jnp.mean(jnp.square(known_input_effect))),
             'input_prior_residual_rms': jnp.sqrt(jnp.mean(jnp.square(outputs))),
-            'input_prior_one_step_rmse': jnp.sqrt(jnp.mean(jnp.square(
-                imagined_next - batch.next_observations))),
+            'input_prior_one_step_rmse': model_info['model_one_step_rmse'],
         }
 
     new_ens_state, (loss, mse) = ens.update(
@@ -423,6 +465,7 @@ def _update_jit(
                 'ens_info_gain_mean': ens_state.ensemble_normalizer_state.info_gain_normalizer_state.mean.mean(),
                 'ens_info_gain_std': ens_state.ensemble_normalizer_state.info_gain_normalizer_state.std.mean(),
                 # 'ens_info_gain_num_points': ens_state.ensemble_normalizer_state.info_gain_normalizer_state.num_points,
+                **model_info,
                 **prior_info,
                 }
 
@@ -486,6 +529,7 @@ class MaxInfoOmbrlLearner(object):
                  deterministic_policy: bool = False,
                  deterministic_train_actions: bool = False,
                  use_action_entropy: bool = True,
+                 use_dynamics_entropy: bool = True,
                  pseudo_ct: bool = False,
                  dt: float = None,
                  action_repeat: int = None,
@@ -508,6 +552,7 @@ class MaxInfoOmbrlLearner(object):
         self.deterministic_policy = deterministic_policy
         self.deterministic_train_actions = deterministic_train_actions
         self.use_action_entropy = use_action_entropy
+        self.use_dynamics_entropy = use_dynamics_entropy
         self.critic_real_data_update_period = critic_real_data_update_period
         self.perturb_rate = perturb_rate
         if policy_update_period:
@@ -732,6 +777,7 @@ class MaxInfoOmbrlLearner(object):
             action_repeat=self.action_repeat,
             deterministic_policy=self.deterministic_policy,
             use_action_entropy=self.use_action_entropy,
+            use_dynamics_entropy=self.use_dynamics_entropy,
             known_input_effect=known_input_effect,
             input_knowledge=self.input_knowledge,
         )

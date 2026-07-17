@@ -50,6 +50,7 @@ MBPO_MEAN = {
     'sample_model': [0],
     'dyn_ent_lr': [0.0],
     'init_temperature_dyn_entropy': [1e-8],
+    'use_dynamics_entropy': [0],
 } | COMMON
 
 MBPO_GREEDY = {
@@ -62,6 +63,7 @@ MBPO_GREEDY = {
     'deterministic_policy': [1],
     'deterministic_train_actions': [1],
     'use_action_entropy': [0],
+    'use_dynamics_entropy': [0],
 } | COMMON
 
 MOUNTAIN_CAR = {

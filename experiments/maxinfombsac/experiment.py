@@ -44,6 +44,7 @@ def experiment(
         deterministic_policy: bool = False,
         deterministic_train_actions: bool = False,
         use_action_entropy: bool = True,
+        use_dynamics_entropy: bool = True,
         process_noise_std: float = 0.0,
         pseudo_ct: bool = False,
         predict_diff: bool = True,
@@ -98,6 +99,7 @@ def experiment(
             alg_kwargs['deterministic_policy'] = deterministic_policy
             alg_kwargs['deterministic_train_actions'] = deterministic_train_actions
             alg_kwargs['use_action_entropy'] = use_action_entropy
+            alg_kwargs['use_dynamics_entropy'] = use_dynamics_entropy
             alg_kwargs['pseudo_ct'] = pseudo_ct
             alg_kwargs['predict_diff'] = predict_diff
             alg_kwargs['input_knowledge'] = input_knowledge
@@ -141,6 +143,7 @@ def experiment(
         'deterministic_policy': deterministic_policy,
         'deterministic_train_actions': deterministic_train_actions,
         'use_action_entropy': use_action_entropy,
+        'use_dynamics_entropy': use_dynamics_entropy,
         'process_noise_std': process_noise_std,
         'pseudo_ct': pseudo_ct,
         'predict_diff': predict_diff,
@@ -223,6 +226,7 @@ def main(args):
         deterministic_policy=bool(args.deterministic_policy),
         deterministic_train_actions=bool(args.deterministic_train_actions),
         use_action_entropy=bool(args.use_action_entropy),
+        use_dynamics_entropy=bool(args.use_dynamics_entropy),
         use_bronet=bool(args.use_bronet),
         process_noise_std=args.process_noise_std,
         pseudo_ct=bool(args.pseudo_ct),
@@ -274,6 +278,7 @@ if __name__ == '__main__':
     parser.add_argument('--deterministic_policy', type=int, default=0)
     parser.add_argument('--deterministic_train_actions', type=int, default=0)
     parser.add_argument('--use_action_entropy', type=int, default=1)
+    parser.add_argument('--use_dynamics_entropy', type=int, default=1)
     parser.add_argument('--use_bronet', type=int, default=1)
     parser.add_argument('--process_noise_std', type=float, default=0.0)
     parser.add_argument('--pseudo_ct', type=int, default=0)
