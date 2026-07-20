@@ -14,7 +14,11 @@ from maxinforl_jax.agents import MaxInfoSacLearner
 from ombrl.agents import MaxInfoOmbrlLearner
 from jaxrl.datasets import Batch, ReplayBuffer
 from maxinforl_jax.datasets import NstepReplayBuffer
-from ombrl.utils.wrappers import AdditiveGaussianProcessNoise, PendulumInitWrapper
+from ombrl.utils.wrappers import (
+    AdditiveGaussianProcessNoise,
+    PendulumInitWrapper,
+    QuadrupedPhysicalStateObservation,
+)
 from ombrl.utils.input_priors import EnvStateAccessor, InputEffectCache, SimulatorStateBuffer, TrueInputEffect
 from jaxrl.evaluation import evaluate
 from jaxrl.utils import make_env
@@ -71,9 +75,26 @@ def _sample_replay_buffer_with_indices(replay_buffer, batch_size: int):
     )
 
 
-def add_process_noise(env, process_noise_std: float, seed: int):
-    if process_noise_std > 0.0:
-        return AdditiveGaussianProcessNoise(env, noise_std=process_noise_std, seed=seed)
+def add_process_noise(
+        env,
+        process_noise_std: float,
+        seed: int,
+        process_actuator_noise_std: Optional[float] = None,
+        project_process_noise_to_constraints: bool = False,
+):
+    actuator_noise_std = (
+        process_noise_std
+        if process_actuator_noise_std is None
+        else process_actuator_noise_std
+    )
+    if process_noise_std > 0.0 or actuator_noise_std > 0.0:
+        return AdditiveGaussianProcessNoise(
+            env,
+            noise_std=process_noise_std,
+            actuator_noise_std=actuator_noise_std,
+            project_velocity_noise=project_process_noise_to_constraints,
+            seed=seed,
+        )
     return env
 
 
@@ -81,6 +102,17 @@ def get_deterministic_prior_env(env):
     if isinstance(env, AdditiveGaussianProcessNoise):
         return env.env
     return env
+
+
+def use_quadruped_physical_observation(env_name: str, env, enabled: bool):
+    if not enabled:
+        return env
+    if not env_name.startswith('quadruped-'):
+        raise ValueError(
+            "quadruped_physical_observation=True is only supported for "
+            f"dm-control quadruped tasks, got {env_name!r}."
+        )
+    return QuadrupedPhysicalStateObservation(env)
 
 
 def make_humanoid_bench_env(
@@ -255,12 +287,43 @@ def train(
     run_name = f"{env_name}__{alg_name}__{seed}__{int(time.time())}__{exp_hash}"
     env_kwargs = dict(env_kwargs)
     process_noise_std = float(env_kwargs.pop('process_noise_std', 0.0))
+    raw_actuator_noise_std = env_kwargs.pop(
+        'process_actuator_noise_std', None
+    )
+    process_actuator_noise_std = (
+        None
+        if raw_actuator_noise_std is None
+        else float(raw_actuator_noise_std)
+    )
+    project_process_noise_to_constraints = bool(env_kwargs.pop(
+        'project_process_noise_to_constraints', False
+    ))
+    quadruped_physical_observation = bool(env_kwargs.pop(
+        'quadruped_physical_observation', False
+    ))
+    if (quadruped_physical_observation
+            and not env_name.startswith('quadruped-')):
+        raise ValueError(
+            "quadruped_physical_observation=True requires a dm-control "
+            f"quadruped task, got {env_name!r}."
+        )
     if alg_kwargs.get('input_knowledge', False) and n_steps_returns >= 0:
         raise NotImplementedError(
             "input_knowledge=True currently supports one-step replay buffers only."
         )
 
     input_knowledge = alg_kwargs.get('input_knowledge', False)
+
+    def with_process_noise(environment, noise_seed):
+        return add_process_noise(
+            environment,
+            process_noise_std=process_noise_std,
+            process_actuator_noise_std=process_actuator_noise_std,
+            project_process_noise_to_constraints=(
+                project_process_noise_to_constraints
+            ),
+            seed=noise_seed,
+        )
 
     if save_video:
         video_train_folder = os.path.join(logs_dir, 'video', 'train')
@@ -286,8 +349,8 @@ def train(
                                                 save_folder=None,
                                                 recording_image_size=None,
                                                 **env_kwargs)
-        env = add_process_noise(env, process_noise_std, seed)
-        eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
+        env = with_process_noise(env, seed)
+        eval_env = with_process_noise(eval_env, seed + 42)
     elif 'metaworld' in env_name:
         _, task_name = env_name.split('_')
         env = make_metaworld_env(env_name=task_name, seed=seed, save_folder=video_train_folder, **env_kwargs)
@@ -296,8 +359,8 @@ def train(
         if input_knowledge:
             prior_env = make_metaworld_env(env_name=task_name, seed=seed + 4242,
                                            save_folder=None, **env_kwargs)
-        env = add_process_noise(env, process_noise_std, seed)
-        eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
+        env = with_process_noise(env, seed)
+        eval_env = with_process_noise(eval_env, seed + 42)
     else:
         env = make_env(env_name=env_name, seed=seed,
                        save_folder=video_train_folder,
@@ -325,8 +388,22 @@ def train(
             eval_env = PendulumInitWrapper(env, init_angle=0.0, init_vel=0.0)
             if prior_env is not None:
                 prior_env = PendulumInitWrapper(prior_env, init_angle=0.0, init_vel=0.0)
-        env = add_process_noise(env, process_noise_std, seed)
-        eval_env = add_process_noise(eval_env, process_noise_std, seed + 42)
+        env = use_quadruped_physical_observation(
+            env_name, env, quadruped_physical_observation
+        )
+        eval_env = use_quadruped_physical_observation(
+            env_name, eval_env, quadruped_physical_observation
+        )
+        if prior_env is not None:
+            prior_env = use_quadruped_physical_observation(
+                env_name, prior_env, quadruped_physical_observation
+            )
+        env.observation_space.seed(seed)
+        eval_env.observation_space.seed(seed + 42)
+        if prior_env is not None:
+            prior_env.observation_space.seed(seed + 4242)
+        env = with_process_noise(env, seed)
+        eval_env = with_process_noise(eval_env, seed + 42)
 
     np.random.seed(seed)
     random.seed(seed)

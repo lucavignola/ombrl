@@ -3,6 +3,62 @@ from typing import Optional
 import numpy as np
 import gymnasium as gym
 
+
+class QuadrupedPhysicalStateObservation(gym.ObservationWrapper):
+    """Expose MuJoCo integration state modulo horizontal translation.
+
+    The standard dm-control quadruped observation mixes an incomplete physical
+    state with accelerometer and contact-force sensors. This representation
+    instead contains qpos without global x/y, followed by qvel and actuator
+    activation state.
+    """
+
+    _OMITTED_ROOT_TRANSLATIONS = 2
+
+    def __init__(self, env):
+        super().__init__(env)
+        self._physics = getattr(env.unwrapped, "physics", None)
+        if self._physics is None:
+            raise TypeError(
+                "QuadrupedPhysicalStateObservation requires a dm-control "
+                "environment exposing physics."
+            )
+
+        model = self._physics.model
+        import mujoco
+
+        joint_types = np.asarray(model.jnt_type)
+        joint_qpos_addresses = np.asarray(model.jnt_qposadr)
+        free_joint_type = int(mujoco.mjtJoint.mjJNT_FREE)
+        if (joint_types.size == 0 or int(joint_types[0]) != free_joint_type
+                or int(joint_qpos_addresses[0]) != 0):
+            raise ValueError(
+                "Expected the quadruped root to be the first MuJoCo free joint."
+            )
+
+        observation_dim = (
+            int(model.nq) - self._OMITTED_ROOT_TRANSLATIONS
+            + int(model.nv)
+            + int(model.na)
+        )
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(observation_dim,),
+            dtype=np.float32,
+        )
+
+    def observation(self, observation):
+        del observation
+        data = self._physics.data
+        state = np.concatenate((
+            np.asarray(data.qpos)[self._OMITTED_ROOT_TRANSLATIONS:],
+            np.asarray(data.qvel),
+            np.asarray(data.act),
+        ))
+        return state.astype(np.float32, copy=False)
+
+
 class PendulumInitWrapper(Wrapper):
     def __init__(self, env, init_angle: float = np.pi, init_vel: float = 0.0):
         """
@@ -30,15 +86,29 @@ class AdditiveGaussianProcessNoise(Wrapper):
     """Apply Gaussian noise to the simulator state after each transition.
 
     For MuJoCo environments the disturbance is applied to generalized
-    velocities, which avoids invalidating free-joint quaternions. Environments
-    exposing a NumPy ``state`` receive additive noise on that state. The old
-    observation-noise behavior is retained only as a fallback for simulators
-    whose state cannot be mutated.
+    velocities and any actuator activation state, which avoids invalidating
+    free-joint quaternions. Environments exposing a NumPy ``state`` receive
+    bounded additive noise on that state. Observation noise is retained only
+    as a fallback for simulators whose state cannot be mutated.
     """
 
-    def __init__(self, env, noise_std: float = 0.0, seed: Optional[int] = None):
+    def __init__(self, env, noise_std: float = 0.0,
+                 actuator_noise_std: Optional[float] = None,
+                 project_velocity_noise: bool = False,
+                 seed: Optional[int] = None):
         super().__init__(env)
         self.noise_std = float(noise_std)
+        self.actuator_noise_std = (
+            self.noise_std
+            if actuator_noise_std is None
+            else float(actuator_noise_std)
+        )
+        if self.noise_std < 0.0 or self.actuator_noise_std < 0.0:
+            raise ValueError("Process-noise standard deviations must be non-negative.")
+        self.has_process_noise = (
+            self.noise_std > 0.0 or self.actuator_noise_std > 0.0
+        )
+        self.project_velocity_noise = bool(project_velocity_noise)
         self.rng = np.random.default_rng(seed)
         self.base_env = env.unwrapped
         self._wrapper_chain = []
@@ -60,6 +130,15 @@ class AdditiveGaussianProcessNoise(Wrapper):
         else:
             self.noise_mode = "observation_fallback"
 
+        self._mujoco_model = None
+        self._mujoco_data = None
+        self._mass_solve_rhs = None
+        self._mass_solve_result = None
+        self._solve_mass_matrix = None
+        self._equality_constraint_type = None
+        if self.project_velocity_noise:
+            self._initialize_constraint_projection()
+
         self._clip_low = None
         self._clip_high = None
         space = self.observation_space
@@ -67,6 +146,68 @@ class AdditiveGaussianProcessNoise(Wrapper):
             if np.all(np.isfinite(space.low)) or np.all(np.isfinite(space.high)):
                 self._clip_low = space.low
                 self._clip_high = space.high
+
+    def _initialize_constraint_projection(self):
+        if self._physics is None or not hasattr(self._physics.data, "qvel"):
+            raise TypeError(
+                "Constraint-projected process noise requires dm-control MuJoCo physics."
+            )
+
+        import mujoco
+
+        self._mujoco_model = getattr(self._physics.model, "ptr", self._physics.model)
+        self._mujoco_data = getattr(self._physics.data, "ptr", self._physics.data)
+        self._equality_constraint_type = int(
+            mujoco.mjtConstraint.mjCNSTR_EQUALITY
+        )
+        # A single equality (for example, a weld) can occupy multiple rows.
+        solve_shape = (
+            int(self._mujoco_model.nv),
+            int(self._mujoco_model.nv),
+        )
+        self._mass_solve_rhs = np.empty(
+            solve_shape,
+            dtype=np.float64,
+        )
+        self._mass_solve_result = np.empty_like(self._mass_solve_rhs)
+        self._solve_mass_matrix = lambda result, rhs: mujoco.mj_solveM(
+            self._mujoco_model, self._mujoco_data, result, rhs
+        )
+
+    def _project_onto_equality_tangent(self, disturbance):
+        data = self._mujoco_data
+        model = self._mujoco_model
+        num_constraints = int(data.nefc)
+        if num_constraints == 0:
+            return disturbance
+
+        constraint_types = np.asarray(data.efc_type[:num_constraints])
+        equality_rows = constraint_types == self._equality_constraint_type
+        if not np.any(equality_rows):
+            return disturbance
+
+        constraint_jacobian = np.asarray(data.efc_J)
+        required_size = num_constraints * model.nv
+        if constraint_jacobian.size < required_size:
+            raise RuntimeError(
+                "Constraint projection requires MuJoCo's dense constraint Jacobian."
+            )
+        constraint_jacobian = constraint_jacobian.reshape(-1, model.nv)
+        equality_jacobian = constraint_jacobian[:num_constraints][equality_rows]
+
+        num_equalities = equality_jacobian.shape[0]
+        mass_solve_rhs = self._mass_solve_rhs[:num_equalities]
+        mass_solve_result = self._mass_solve_result[:num_equalities]
+        mass_solve_rhs[:] = equality_jacobian
+        self._solve_mass_matrix(mass_solve_result, mass_solve_rhs)
+        inverse_mass_jacobian_t = mass_solve_result.T
+        constraint_mass = (
+            equality_jacobian @ inverse_mass_jacobian_t
+        )
+        multiplier = np.linalg.solve(
+            constraint_mass, equality_jacobian @ disturbance
+        )
+        return disturbance - inverse_mass_jacobian_t @ multiplier
 
     def _add_observation_noise(self, observation):
         if self.noise_std <= 0.0:
@@ -89,7 +230,17 @@ class AdditiveGaussianProcessNoise(Wrapper):
     def _apply_simulator_noise(self):
         if self._physics is not None and hasattr(self._physics.data, "qvel"):
             qvel = self._physics.data.qvel
-            qvel[:] = qvel + self.rng.normal(0.0, self.noise_std, qvel.shape)
+            if self.noise_std > 0.0:
+                disturbance = self.rng.normal(0.0, self.noise_std, qvel.shape)
+                if self.project_velocity_noise:
+                    disturbance = self._project_onto_equality_tangent(disturbance)
+                qvel[:] = qvel + disturbance
+
+            actuator_state = self._physics.data.act
+            if self.actuator_noise_std > 0.0 and actuator_state.size:
+                actuator_state[:] = actuator_state + self.rng.normal(
+                    0.0, self.actuator_noise_std, actuator_state.shape
+                )
             if hasattr(self._physics, "after_reset"):
                 self._physics.after_reset()
             elif hasattr(self._physics, "forward"):
@@ -101,8 +252,19 @@ class AdditiveGaussianProcessNoise(Wrapper):
             self.base_env.set_state(qpos, qvel)
         else:
             state = np.asarray(self.base_env.state)
-            self.base_env.state = state + self.rng.normal(
+            noisy_state = state + self.rng.normal(
                 0.0, self.noise_std, state.shape)
+            if (self._clip_low is not None
+                    and self.observation_space.shape == noisy_state.shape):
+                noisy_state = np.clip(
+                    noisy_state, self._clip_low, self._clip_high
+                )
+            if (noisy_state.size >= 2
+                    and hasattr(self.base_env, "min_position")
+                    and noisy_state[0] <= self.base_env.min_position
+                    and noisy_state[1] < 0.0):
+                noisy_state[1] = 0.0
+            self.base_env.state = noisy_state.astype(state.dtype, copy=False)
 
         return self._current_observation()
 
@@ -139,24 +301,28 @@ class AdditiveGaussianProcessNoise(Wrapper):
         step = self.env.step(action)
         if len(step) == 5:
             observation, reward, terminated, truncated, info = step
-            if self.noise_std > 0.0:
+            if self.has_process_noise:
                 if self.noise_mode == "observation_fallback":
                     observation = self._add_observation_noise(observation)
                 else:
                     observation = self._apply_simulator_noise()
             info = dict(info)
             info['process_noise_std'] = self.noise_std
+            info['process_actuator_noise_std'] = self.actuator_noise_std
+            info['process_noise_projected'] = self.project_velocity_noise
             info['process_noise_mode'] = self.noise_mode
             return observation, reward, terminated, truncated, info
 
         observation, reward, done, info = step
-        if self.noise_std > 0.0:
+        if self.has_process_noise:
             if self.noise_mode == "observation_fallback":
                 observation = self._add_observation_noise(observation)
             else:
                 observation = self._apply_simulator_noise()
         info = dict(info)
         info['process_noise_std'] = self.noise_std
+        info['process_actuator_noise_std'] = self.actuator_noise_std
+        info['process_noise_projected'] = self.project_velocity_noise
         info['process_noise_mode'] = self.noise_mode
         return observation, reward, done, info
 

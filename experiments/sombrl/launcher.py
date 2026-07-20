@@ -97,6 +97,8 @@ QUADRUPED = {
     'eval_interval': [10_000],
     'action_repeat': [2],
     'num_neurons': [512],
+    'quadruped_physical_observation': [1],
+    'project_process_noise_to_constraints': [1],
 }
 
 HUMANOID = {
