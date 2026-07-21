@@ -86,27 +86,33 @@ class AdditiveGaussianProcessNoise(Wrapper):
     """Apply Gaussian noise to the simulator state after each transition.
 
     For MuJoCo environments the disturbance is applied to generalized
-    velocities and any actuator activation state, which avoids invalidating
-    free-joint quaternions. Environments exposing a NumPy ``state`` receive
-    bounded additive noise on that state. Observation noise is retained only
-    as a fallback for simulators whose state cannot be mutated.
+    velocities and any actuator activation state. Optional configuration
+    noise is integrated through MuJoCo's tangent-space operation, preserving
+    valid free-joint quaternions. Environments exposing a NumPy ``state``
+    receive bounded additive noise on that state. Observation noise is
+    retained only as a fallback for simulators whose state cannot be mutated.
     """
 
     def __init__(self, env, noise_std: float = 0.0,
                  actuator_noise_std: Optional[float] = None,
+                 position_noise_std: float = 0.0,
                  project_velocity_noise: bool = False,
                  seed: Optional[int] = None):
         super().__init__(env)
         self.noise_std = float(noise_std)
+        self.position_noise_std = float(position_noise_std)
         self.actuator_noise_std = (
             self.noise_std
             if actuator_noise_std is None
             else float(actuator_noise_std)
         )
-        if self.noise_std < 0.0 or self.actuator_noise_std < 0.0:
+        if (self.noise_std < 0.0 or self.position_noise_std < 0.0
+                or self.actuator_noise_std < 0.0):
             raise ValueError("Process-noise standard deviations must be non-negative.")
         self.has_process_noise = (
-            self.noise_std > 0.0 or self.actuator_noise_std > 0.0
+            self.noise_std > 0.0
+            or self.position_noise_std > 0.0
+            or self.actuator_noise_std > 0.0
         )
         self.project_velocity_noise = bool(project_velocity_noise)
         self.rng = np.random.default_rng(seed)
@@ -135,9 +141,10 @@ class AdditiveGaussianProcessNoise(Wrapper):
         self._mass_solve_rhs = None
         self._mass_solve_result = None
         self._solve_mass_matrix = None
+        self._integrate_position = None
         self._equality_constraint_type = None
-        if self.project_velocity_noise:
-            self._initialize_constraint_projection()
+        if self.project_velocity_noise or self.position_noise_std > 0.0:
+            self._initialize_mujoco_state_noise()
 
         self._clip_low = None
         self._clip_high = None
@@ -147,10 +154,11 @@ class AdditiveGaussianProcessNoise(Wrapper):
                 self._clip_low = space.low
                 self._clip_high = space.high
 
-    def _initialize_constraint_projection(self):
+    def _initialize_mujoco_state_noise(self):
         if self._physics is None or not hasattr(self._physics.data, "qvel"):
             raise TypeError(
-                "Constraint-projected process noise requires dm-control MuJoCo physics."
+                "Position or constraint-projected process noise requires "
+                "dm-control MuJoCo physics."
             )
 
         import mujoco
@@ -172,6 +180,9 @@ class AdditiveGaussianProcessNoise(Wrapper):
         self._mass_solve_result = np.empty_like(self._mass_solve_rhs)
         self._solve_mass_matrix = lambda result, rhs: mujoco.mj_solveM(
             self._mujoco_model, self._mujoco_data, result, rhs
+        )
+        self._integrate_position = lambda position, velocity: mujoco.mj_integratePos(
+            self._mujoco_model, position, velocity, 1.0
         )
 
     def _project_onto_equality_tangent(self, disturbance):
@@ -235,6 +246,19 @@ class AdditiveGaussianProcessNoise(Wrapper):
                 if self.project_velocity_noise:
                     disturbance = self._project_onto_equality_tangent(disturbance)
                 qvel[:] = qvel + disturbance
+
+            if self.position_noise_std > 0.0:
+                position_disturbance = self.rng.normal(
+                    0.0, self.position_noise_std, qvel.shape
+                )
+                if self.project_velocity_noise:
+                    position_disturbance = self._project_onto_equality_tangent(
+                        position_disturbance
+                    )
+                self._integrate_position(
+                    self._physics.data.qpos,
+                    position_disturbance,
+                )
 
             actuator_state = self._physics.data.act
             if self.actuator_noise_std > 0.0 and actuator_state.size:
@@ -308,6 +332,7 @@ class AdditiveGaussianProcessNoise(Wrapper):
                     observation = self._apply_simulator_noise()
             info = dict(info)
             info['process_noise_std'] = self.noise_std
+            info['process_position_noise_std'] = self.position_noise_std
             info['process_actuator_noise_std'] = self.actuator_noise_std
             info['process_noise_projected'] = self.project_velocity_noise
             info['process_noise_mode'] = self.noise_mode
@@ -321,6 +346,7 @@ class AdditiveGaussianProcessNoise(Wrapper):
                 observation = self._apply_simulator_noise()
         info = dict(info)
         info['process_noise_std'] = self.noise_std
+        info['process_position_noise_std'] = self.position_noise_std
         info['process_actuator_noise_std'] = self.actuator_noise_std
         info['process_noise_projected'] = self.project_velocity_noise
         info['process_noise_mode'] = self.noise_mode

@@ -29,13 +29,14 @@ COMMON = {
     'use_bronet': [1],
     'num_hidden_layers': [2],
     'pseudo_ct': [0],
+    'predict_reward': [0],
     'predict_diff': [1],
     'eval_episodes': [10],
     'perturb_model': [1],
     'perturb_policy': [0],
-    'process_noise_std': [0],
-    'internal_noise_std': [0],
-    'internal_noise_samples': [1],
+    'process_noise_std': [1e-3],
+    'internal_noise_std': [1e-3],
+    'internal_noise_samples': [4],
 }
 
 MBPO_OPTIMISTIC = {
@@ -99,6 +100,7 @@ QUADRUPED = {
     'num_neurons': [512],
     'quadruped_physical_observation': [1],
     'project_process_noise_to_constraints': [1],
+    'process_position_noise_std': COMMON['process_noise_std'],
 }
 
 HUMANOID = {

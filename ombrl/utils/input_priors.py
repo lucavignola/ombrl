@@ -3,6 +3,66 @@ import copy
 import numpy as np
 
 
+def _zero_control_action(env, action_space) -> np.ndarray:
+    """Return the outer action that applies zero control to the base env."""
+    import gymnasium as gym
+    from gymnasium.wrappers import RescaleAction
+
+    action_wrappers = []
+    current = env
+    while isinstance(current, gym.Wrapper):
+        if (isinstance(current, gym.ActionWrapper)
+                and type(current).action is not gym.ActionWrapper.action):
+            action_wrappers.append(current)
+        current = current.env
+
+    if not isinstance(current.action_space, gym.spaces.Box):
+        raise TypeError(
+            "input_knowledge=True requires a continuous Box action space."
+        )
+
+    action = np.zeros(
+        current.action_space.shape,
+        dtype=current.action_space.dtype,
+    )
+    for wrapper in reversed(action_wrappers):
+        if isinstance(wrapper, RescaleAction):
+            inner_space = wrapper.env.action_space
+            inner_span = inner_space.high - inner_space.low
+            if np.any(~np.isfinite(inner_span)) or np.any(inner_span <= 0.0):
+                raise ValueError(
+                    "Cannot invert RescaleAction with an invalid inner action range."
+                )
+            action = wrapper.min_action + (
+                (action - inner_space.low) / inner_span
+            ) * (wrapper.max_action - wrapper.min_action)
+            continue
+
+        candidate = np.asarray(action, dtype=wrapper.action_space.dtype)
+        transformed = np.asarray(wrapper.action(candidate))
+        if transformed.shape != action.shape or not np.allclose(
+                transformed, action, rtol=1e-6, atol=1e-7):
+            raise NotImplementedError(
+                "Cannot invert action wrapper "
+                f"{type(wrapper).__name__} to obtain zero physical control."
+            )
+        action = candidate
+
+    action = np.asarray(action, dtype=action_space.dtype)
+    if action.shape != action_space.shape:
+        raise ValueError(
+            "The zero-control action shape does not match the outer action space: "
+            f"{action.shape} != {action_space.shape}."
+        )
+    if isinstance(action_space, gym.spaces.Box):
+        tolerance = 1e-6
+        if (np.any(action < action_space.low - tolerance)
+                or np.any(action > action_space.high + tolerance)):
+            raise ValueError("Zero physical control is outside the agent action space.")
+        action = np.clip(action, action_space.low, action_space.high)
+    return action.astype(action_space.dtype, copy=False)
+
+
 class EnvStateAccessor:
     def __init__(self, env):
         self.env = env
@@ -80,11 +140,15 @@ class _EnvStepStateAccessor:
 
 
 class TrueInputEffect:
-    """Estimate F(x, u) - F(x, 0) from a simulator with restorable state."""
+    """Estimate F(x, u) - F(x, 0) from a simulator with restorable state.
+
+    Here zero denotes zero control in the base simulator, not necessarily zero
+    in a normalized outer action space.
+    """
 
     def __init__(self, env, action_space, clone_env: bool = False, preserve_state: bool = True):
         self.env = copy.deepcopy(env) if clone_env else env
-        self.zero_action = np.zeros(action_space.shape, dtype=action_space.dtype)
+        self.zero_action = _zero_control_action(self.env, action_space)
         self.preserve_state = preserve_state
         self.state_accessor = EnvStateAccessor(self.env)
         self.step_state_accessor = _EnvStepStateAccessor(self.env)

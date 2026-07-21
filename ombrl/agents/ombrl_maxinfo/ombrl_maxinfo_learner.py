@@ -291,6 +291,7 @@ def update_critic_local(key: PRNGKey,
                                     'use_action_entropy',
                                     'use_dynamics_entropy',
                                     'input_knowledge',
+                                    'quadruped_state_metrics',
                                     ))
 def _update_jit(
         rng: PRNGKey, actor: Model, critic: Model, target_actor: Model, target_critic: Model, temp: Model, # type: ignore
@@ -302,6 +303,7 @@ def _update_jit(
         internal_noise_std: float, internal_noise_samples: int, dt: float, action_repeat: int,
         deterministic_policy: bool, use_action_entropy: bool, use_dynamics_entropy: bool,
         known_input_effect: Optional[jnp.ndarray], input_knowledge: bool,
+        quadruped_state_metrics: bool,
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, Model, Model, EnsembleState, InfoDict]: # type: ignore
     rng, key = jax.random.split(rng)
     if update_critic_with_real_data:
@@ -440,6 +442,28 @@ def _update_jit(
             one_step_error / jnp.maximum(output_std, 1e-3)))),
         'model_transition_rms': transition_rms,
     }
+    if quadruped_state_metrics:
+        coordinate_groups = (
+            ('root_pose', 0, 5),
+            ('joint_position', 5, 21),
+            ('root_velocity', 21, 27),
+            ('joint_velocity', 27, 43),
+            ('actuator_state', 43, 55),
+        )
+        for name, start, stop in coordinate_groups:
+            group_error = one_step_error[..., start:stop]
+            group_output_std = output_std[start:stop]
+            model_info[f'model_one_step_rmse_{name}'] = jnp.sqrt(
+                jnp.mean(jnp.square(group_error))
+            )
+            model_info[f'model_one_step_normalized_rmse_{name}'] = jnp.sqrt(
+                jnp.mean(jnp.square(
+                    group_error / jnp.maximum(group_output_std, 1e-3)
+                ))
+            )
+            model_info[f'model_output_std_{name}'] = jnp.sqrt(
+                jnp.mean(jnp.square(group_output_std))
+            )
 
     prior_info = {}
     if input_knowledge:
@@ -534,12 +558,19 @@ class MaxInfoOmbrlLearner(object):
                  dt: float = None,
                  action_repeat: int = None,
                  input_knowledge: bool = False,
+                 quadruped_state_metrics: bool = False,
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
         """
 
         self.input_knowledge = input_knowledge
+        self.quadruped_state_metrics = quadruped_state_metrics
+        if self.quadruped_state_metrics and observations.shape[-1] != 55:
+            raise ValueError(
+                "Quadruped state metrics require the 55-dimensional physical "
+                f"observation, got {observations.shape[-1]}."
+            )
         # Rewards in these tasks depend on the action-driven next state. They
         # cannot be learned by the state-only prior model and are not used to
         # construct imagined batches, so omit that otherwise impossible head.
@@ -780,6 +811,7 @@ class MaxInfoOmbrlLearner(object):
             use_dynamics_entropy=self.use_dynamics_entropy,
             known_input_effect=known_input_effect,
             input_knowledge=self.input_knowledge,
+            quadruped_state_metrics=self.quadruped_state_metrics,
         )
 
         self.rng = new_rng
