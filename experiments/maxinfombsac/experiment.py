@@ -47,11 +47,9 @@ def experiment(
         use_dynamics_entropy: bool = True,
         process_noise_std: float = 0.0,
         process_actuator_noise_std: Optional[float] = None,
-        process_position_noise_std: float = 0.0,
         project_process_noise_to_constraints: bool = False,
         quadruped_physical_observation: bool = False,
         pseudo_ct: bool = False,
-        predict_reward: bool = True,
         predict_diff: bool = True,
         input_knowledge: bool = False,
         cache_input_effects: bool = True,
@@ -63,7 +61,6 @@ def experiment(
         'action_repeat': action_repeat,
         'process_noise_std': process_noise_std,
         'process_actuator_noise_std': process_actuator_noise_std,
-        'process_position_noise_std': process_position_noise_std,
         'project_process_noise_to_constraints': (
             project_process_noise_to_constraints
         ),
@@ -113,7 +110,6 @@ def experiment(
             alg_kwargs['use_action_entropy'] = use_action_entropy
             alg_kwargs['use_dynamics_entropy'] = use_dynamics_entropy
             alg_kwargs['pseudo_ct'] = pseudo_ct
-            alg_kwargs['predict_reward'] = predict_reward
             alg_kwargs['predict_diff'] = predict_diff
             alg_kwargs['input_knowledge'] = input_knowledge
             alg_kwargs['cache_input_effects'] = cache_input_effects
@@ -161,7 +157,6 @@ def experiment(
         'use_action_entropy': use_action_entropy,
         'use_dynamics_entropy': use_dynamics_entropy,
         'process_noise_std': process_noise_std,
-        'process_position_noise_std': process_position_noise_std,
         'process_actuator_noise_std': (
             process_noise_std
             if process_actuator_noise_std is None
@@ -172,7 +167,6 @@ def experiment(
         ),
         'quadruped_physical_observation': quadruped_physical_observation,
         'pseudo_ct': pseudo_ct,
-        'predict_reward': predict_reward,
         'predict_diff': predict_diff,
         'input_knowledge': input_knowledge,
         'cache_input_effects': cache_input_effects,
@@ -257,7 +251,6 @@ def main(args):
         use_bronet=bool(args.use_bronet),
         process_noise_std=args.process_noise_std,
         process_actuator_noise_std=args.process_actuator_noise_std,
-        process_position_noise_std=args.process_position_noise_std,
         project_process_noise_to_constraints=bool(
             args.project_process_noise_to_constraints
         ),
@@ -265,7 +258,6 @@ def main(args):
             args.quadruped_physical_observation
         ),
         pseudo_ct=bool(args.pseudo_ct),
-        predict_reward=bool(args.predict_reward),
         predict_diff=bool(args.predict_diff),
         input_knowledge=bool(args.input_knowledge),
         cache_input_effects=bool(args.cache_input_effects),
@@ -318,7 +310,6 @@ if __name__ == '__main__':
     parser.add_argument('--use_bronet', type=int, default=1)
     parser.add_argument('--process_noise_std', type=float, default=0.0)
     parser.add_argument('--process_actuator_noise_std', type=float, default=None)
-    parser.add_argument('--process_position_noise_std', type=float, default=0.0)
     parser.add_argument(
         '--project_process_noise_to_constraints', type=int, default=0
     )
@@ -326,7 +317,6 @@ if __name__ == '__main__':
         '--quadruped_physical_observation', type=int, default=0
     )
     parser.add_argument('--pseudo_ct', type=int, default=0)
-    parser.add_argument('--predict_reward', type=int, default=1)
     parser.add_argument('--predict_diff', type=int, default=1)
     parser.add_argument('--input_knowledge', type=int, default=0)
     parser.add_argument('--cache_input_effects', type=int, default=1)

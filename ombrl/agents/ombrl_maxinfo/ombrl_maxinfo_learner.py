@@ -228,7 +228,7 @@ def update_critic_local(key: PRNGKey,
                         deterministic_policy: bool,
                         use_action_entropy: bool,
                         use_dynamics_entropy: bool,
-                        input_knowledge: bool) -> Tuple[Model, EnsembleState, InfoDict]:
+                        input_knowledge: bool):
     next_actions, next_log_probs = _policy_actions_and_log_probs(
         actor=actor,
         actor_params=actor.params,
@@ -272,7 +272,7 @@ def update_critic_local(key: PRNGKey,
 
     new_critic, info = critic.apply_gradient(critic_loss_fn)
 
-    return new_critic, new_ens_state, info
+    return new_critic, new_ens_state, info, target_q
 
 
 @functools.partial(jax.jit,
@@ -307,7 +307,7 @@ def _update_jit(
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, Model, Model, EnsembleState, InfoDict]: # type: ignore
     rng, key = jax.random.split(rng)
     if update_critic_with_real_data:
-        new_critic, ens_state, critic_info = update_critic_local(
+        new_critic, ens_state, critic_info, real_target_q = update_critic_local(
             key=key,
             actor=actor,
             critic=critic,
@@ -327,6 +327,7 @@ def _update_jit(
     else:
         new_critic = critic
         critic_info = {}
+        real_target_q = None
 
     rng, model_sample_key = jax.random.split(rng)
     imagined_batch = get_imagined_batch(
@@ -345,7 +346,7 @@ def _update_jit(
         action_repeat=action_repeat,
     )
     rng, key = jax.random.split(rng)
-    new_critic, ens_state, imagined_critic_info = update_critic_local(
+    new_critic, ens_state, imagined_critic_info, imagined_target_q = update_critic_local(
         key=key,
         actor=actor,
         critic=new_critic,
@@ -362,6 +363,28 @@ def _update_jit(
         use_dynamics_entropy=use_dynamics_entropy,
         input_knowledge=input_knowledge,
     )
+
+    value_model_info = {}
+    if update_critic_with_real_data:
+        if internal_noise_samples > 1:
+            imagined_target_q = imagined_target_q.reshape(
+                internal_noise_samples, batch.rewards.shape[0]
+            ).mean(axis=0)
+        target_error = imagined_target_q - real_target_q
+        value_model_info = {
+            'model_value_target_bias': jnp.mean(target_error),
+            'model_value_target_rmse': jnp.sqrt(
+                jnp.mean(jnp.square(target_error))
+            ),
+            'model_value_target_relative_rmse': jnp.sqrt(
+                jnp.mean(jnp.square(target_error))
+            ) / jnp.maximum(
+                jnp.sqrt(jnp.mean(jnp.square(real_target_q))), 1e-6
+            ),
+            'model_value_target_underestimate_fraction': jnp.mean(
+                target_error < 0.0
+            ),
+        }
 
     imagined_critic_info = {f'imagined_critic_{key}': val for key, val in imagined_critic_info.items()}
 
@@ -507,6 +530,7 @@ def _update_jit(
         **alpha_info,
         **dyn_ent_info,
         **ens_info,
+        **value_model_info,
     }
 
 

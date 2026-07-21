@@ -80,7 +80,6 @@ def add_process_noise(
         process_noise_std: float,
         seed: int,
         process_actuator_noise_std: Optional[float] = None,
-        process_position_noise_std: float = 0.0,
         project_process_noise_to_constraints: bool = False,
 ):
     actuator_noise_std = (
@@ -88,13 +87,11 @@ def add_process_noise(
         if process_actuator_noise_std is None
         else process_actuator_noise_std
     )
-    if (process_noise_std > 0.0 or process_position_noise_std > 0.0
-            or actuator_noise_std > 0.0):
+    if process_noise_std > 0.0 or actuator_noise_std > 0.0:
         return AdditiveGaussianProcessNoise(
             env,
             noise_std=process_noise_std,
             actuator_noise_std=actuator_noise_std,
-            position_noise_std=process_position_noise_std,
             project_velocity_noise=project_process_noise_to_constraints,
             seed=seed,
         )
@@ -290,9 +287,6 @@ def train(
     run_name = f"{env_name}__{alg_name}__{seed}__{int(time.time())}__{exp_hash}"
     env_kwargs = dict(env_kwargs)
     process_noise_std = float(env_kwargs.pop('process_noise_std', 0.0))
-    process_position_noise_std = float(env_kwargs.pop(
-        'process_position_noise_std', 0.0
-    ))
     raw_actuator_noise_std = env_kwargs.pop(
         'process_actuator_noise_std', None
     )
@@ -325,7 +319,6 @@ def train(
             environment,
             process_noise_std=process_noise_std,
             process_actuator_noise_std=process_actuator_noise_std,
-            process_position_noise_std=process_position_noise_std,
             project_process_noise_to_constraints=(
                 project_process_noise_to_constraints
             ),
@@ -535,6 +528,7 @@ def train(
                                           info['total']['timesteps'])
 
         if i >= training_start:
+            aggregated_update_info = {}
             for _ in range(updates_per_step):
                 if input_effect is None:
                     batch = replay_buffer.sample(batch_size)
@@ -554,6 +548,9 @@ def train(
                             batch.observations.shape[1:],
                         )
                     update_info = agent.update(batch, known_input_effect=known_input_effect)
+                aggregated_update_info.update(update_info)
+
+            update_info = aggregated_update_info
 
             if i % log_interval == 0:
                 for k, v in update_info.items():
