@@ -51,6 +51,12 @@ MBPO_MEAN = {
     'dyn_ent_lr': [0.0],
     'init_temperature_dyn_entropy': [1e-8],
     'use_dynamics_entropy': [0],
+
+    'temp_lr': [0.0],
+    'init_temperature': [1e-8],
+    'deterministic_policy': [0],
+    'deterministic_train_actions': [0],
+    'use_action_entropy': [0],
 } | COMMON
 
 MBPO_GREEDY = {
@@ -110,6 +116,11 @@ HUMANOID = {
 }
 
 TASKS = [MOUNTAIN_CAR, CARTPOLE, HOPPER, QUADRUPED, HUMANOID]
+KNOWN_REWARD_TASKS = {
+    'MountainCarContinuous-v0',
+    'cartpole-swingup_sparse',
+    'hopper-hop',
+}
 
 
 def dict_permutations(d):
@@ -175,7 +186,7 @@ def generate_run_commands(command_list, num_cpus=1, num_gpus=0, dry=False,
 
 
 def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY, input_knowledge=False,
-                cache_input_effects=True):
+                cache_input_effects=True, known_reward=False):
     flags = []
     for task in TASKS:
         for alg in [MBPO_OPTIMISTIC, MBPO_MEAN, MBPO_GREEDY]:
@@ -184,8 +195,15 @@ def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY, input_knowledge=F
             task_flags['entity_name'] = [entity_name]
             task_flags['input_knowledge'] = [int(input_knowledge)]
             task_flags['cache_input_effects'] = [int(cache_input_effects)]
+            task_uses_known_reward = (
+                known_reward
+                and set(task_flags['env_name']).issubset(KNOWN_REWARD_TASKS)
+            )
+            task_flags['known_reward'] = [int(task_uses_known_reward)]
             if input_knowledge:
                 task_flags['exp_hash'] = [f"{task_flags['exp_hash'][0]}_input_knowledge"]
+            if task_uses_known_reward:
+                task_flags['exp_hash'] = [f"{task_flags['exp_hash'][0]}_known_reward"]
             flags.extend(dict_permutations(task_flags))
     return flags
 
@@ -230,6 +248,7 @@ def main(args):
         args.entity_name,
         args.input_knowledge,
         args.cache_input_effects,
+        args.known_reward,
     )
     validate_experiment_flags(all_flags)
 
@@ -268,5 +287,10 @@ if __name__ == '__main__':
     parser.add_argument('--dry_run', action='store_true')
     parser.add_argument('--yes', action='store_true')
     parser.add_argument('--input_knowledge', action='store_true')
+    parser.add_argument(
+        '--known_reward',
+        action='store_true',
+        help='Use known imagined rewards for MountainCar, Cartpole, and Hopper.',
+    )
     parser.add_argument('--cache_input_effects', type=int, default=1)
     main(parser.parse_args())

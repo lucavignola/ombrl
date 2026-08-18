@@ -47,20 +47,30 @@ def experiment(
         use_dynamics_entropy: bool = True,
         process_noise_std: float = 0.0,
         process_actuator_noise_std: Optional[float] = None,
+        process_position_noise_std: float = 0.0,
         project_process_noise_to_constraints: bool = False,
         quadruped_physical_observation: bool = False,
         pseudo_ct: bool = False,
         predict_diff: bool = True,
         input_knowledge: bool = False,
+        known_reward: bool = False,
         cache_input_effects: bool = True,
 ):
     from ombrl.utils.autotune_train_utils import train
+    from ombrl.utils.known_rewards import resolve_known_reward_type
+
+    known_reward_type = resolve_known_reward_type(env_name, known_reward)
+    if known_reward_type is not None and alg_name != 'maxinfombsac':
+        raise ValueError("known_reward=True requires alg_name='maxinfombsac'.")
+    if known_reward_type is not None and action_cost != 0.0:
+        raise ValueError("known_reward=True currently requires action_cost=0.")
     
     env_kwargs = {
         'action_cost': action_cost,
         'action_repeat': action_repeat,
         'process_noise_std': process_noise_std,
         'process_actuator_noise_std': process_actuator_noise_std,
+        'process_position_noise_std': process_position_noise_std,
         'project_process_noise_to_constraints': (
             project_process_noise_to_constraints
         ),
@@ -112,6 +122,7 @@ def experiment(
             alg_kwargs['pseudo_ct'] = pseudo_ct
             alg_kwargs['predict_diff'] = predict_diff
             alg_kwargs['input_knowledge'] = input_knowledge
+            alg_kwargs['known_reward_type'] = known_reward_type
             alg_kwargs['cache_input_effects'] = cache_input_effects
             alg_kwargs['quadruped_state_metrics'] = (
                 quadruped_physical_observation
@@ -157,6 +168,7 @@ def experiment(
         'use_action_entropy': use_action_entropy,
         'use_dynamics_entropy': use_dynamics_entropy,
         'process_noise_std': process_noise_std,
+        'process_position_noise_std': process_position_noise_std,
         'process_actuator_noise_std': (
             process_noise_std
             if process_actuator_noise_std is None
@@ -169,6 +181,8 @@ def experiment(
         'pseudo_ct': pseudo_ct,
         'predict_diff': predict_diff,
         'input_knowledge': input_knowledge,
+        'known_reward': known_reward,
+        'known_reward_type': known_reward_type,
         'cache_input_effects': cache_input_effects,
     }
 
@@ -251,6 +265,7 @@ def main(args):
         use_bronet=bool(args.use_bronet),
         process_noise_std=args.process_noise_std,
         process_actuator_noise_std=args.process_actuator_noise_std,
+        process_position_noise_std=args.process_position_noise_std,
         project_process_noise_to_constraints=bool(
             args.project_process_noise_to_constraints
         ),
@@ -260,6 +275,7 @@ def main(args):
         pseudo_ct=bool(args.pseudo_ct),
         predict_diff=bool(args.predict_diff),
         input_knowledge=bool(args.input_knowledge),
+        known_reward=bool(args.known_reward),
         cache_input_effects=bool(args.cache_input_effects),
     )
 
@@ -310,6 +326,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_bronet', type=int, default=1)
     parser.add_argument('--process_noise_std', type=float, default=0.0)
     parser.add_argument('--process_actuator_noise_std', type=float, default=None)
+    parser.add_argument('--process_position_noise_std', type=float, default=0.0)
     parser.add_argument(
         '--project_process_noise_to_constraints', type=int, default=0
     )
@@ -319,6 +336,7 @@ if __name__ == '__main__':
     parser.add_argument('--pseudo_ct', type=int, default=0)
     parser.add_argument('--predict_diff', type=int, default=1)
     parser.add_argument('--input_knowledge', type=int, default=0)
+    parser.add_argument('--known_reward', type=int, default=0)
     parser.add_argument('--cache_input_effects', type=int, default=1)
 
     parser.add_argument('--seed', type=int, default=0)

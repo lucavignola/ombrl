@@ -16,10 +16,12 @@ from jaxrl.datasets import Batch, ReplayBuffer
 from maxinforl_jax.datasets import NstepReplayBuffer
 from ombrl.utils.wrappers import (
     AdditiveGaussianProcessNoise,
+    HopperKnownRewardObservation,
     PendulumInitWrapper,
     QuadrupedPhysicalStateObservation,
 )
 from ombrl.utils.input_priors import EnvStateAccessor, InputEffectCache, SimulatorStateBuffer, TrueInputEffect
+from ombrl.utils.known_rewards import HOPPER_HOP_REWARD
 from jaxrl.evaluation import evaluate
 from jaxrl.utils import make_env
 import wandb
@@ -80,6 +82,7 @@ def add_process_noise(
         process_noise_std: float,
         seed: int,
         process_actuator_noise_std: Optional[float] = None,
+        process_position_noise_std: float = 0.0,
         project_process_noise_to_constraints: bool = False,
 ):
     actuator_noise_std = (
@@ -87,11 +90,13 @@ def add_process_noise(
         if process_actuator_noise_std is None
         else process_actuator_noise_std
     )
-    if process_noise_std > 0.0 or actuator_noise_std > 0.0:
+    if (process_noise_std > 0.0 or process_position_noise_std > 0.0
+            or actuator_noise_std > 0.0):
         return AdditiveGaussianProcessNoise(
             env,
             noise_std=process_noise_std,
             actuator_noise_std=actuator_noise_std,
+            position_noise_std=process_position_noise_std,
             project_velocity_noise=project_process_noise_to_constraints,
             seed=seed,
         )
@@ -113,6 +118,16 @@ def use_quadruped_physical_observation(env_name: str, env, enabled: bool):
             f"dm-control quadruped tasks, got {env_name!r}."
         )
     return QuadrupedPhysicalStateObservation(env)
+
+
+def use_known_reward_observation(env_name: str, env, reward_type: Optional[str]):
+    if reward_type != HOPPER_HOP_REWARD:
+        return env
+    if env_name != 'hopper-hop':
+        raise ValueError(
+            "The Hopper known-reward observation requires env_name='hopper-hop'."
+        )
+    return HopperKnownRewardObservation(env)
 
 
 def make_humanoid_bench_env(
@@ -287,6 +302,9 @@ def train(
     run_name = f"{env_name}__{alg_name}__{seed}__{int(time.time())}__{exp_hash}"
     env_kwargs = dict(env_kwargs)
     process_noise_std = float(env_kwargs.pop('process_noise_std', 0.0))
+    process_position_noise_std = float(env_kwargs.pop(
+        'process_position_noise_std', 0.0
+    ))
     raw_actuator_noise_std = env_kwargs.pop(
         'process_actuator_noise_std', None
     )
@@ -313,12 +331,14 @@ def train(
         )
 
     input_knowledge = alg_kwargs.get('input_knowledge', False)
+    known_reward_type = alg_kwargs.get('known_reward_type')
 
     def with_process_noise(environment, noise_seed):
         return add_process_noise(
             environment,
             process_noise_std=process_noise_std,
             process_actuator_noise_std=process_actuator_noise_std,
+            process_position_noise_std=process_position_noise_std,
             project_process_noise_to_constraints=(
                 project_process_noise_to_constraints
             ),
@@ -349,6 +369,14 @@ def train(
                                                 save_folder=None,
                                                 recording_image_size=None,
                                                 **env_kwargs)
+        env = use_known_reward_observation(env_name, env, known_reward_type)
+        eval_env = use_known_reward_observation(
+            env_name, eval_env, known_reward_type
+        )
+        if prior_env is not None:
+            prior_env = use_known_reward_observation(
+                env_name, prior_env, known_reward_type
+            )
         env = with_process_noise(env, seed)
         eval_env = with_process_noise(eval_env, seed + 42)
     elif 'metaworld' in env_name:
@@ -359,6 +387,14 @@ def train(
         if input_knowledge:
             prior_env = make_metaworld_env(env_name=task_name, seed=seed + 4242,
                                            save_folder=None, **env_kwargs)
+        env = use_known_reward_observation(env_name, env, known_reward_type)
+        eval_env = use_known_reward_observation(
+            env_name, eval_env, known_reward_type
+        )
+        if prior_env is not None:
+            prior_env = use_known_reward_observation(
+                env_name, prior_env, known_reward_type
+            )
         env = with_process_noise(env, seed)
         eval_env = with_process_noise(eval_env, seed + 42)
     else:
@@ -397,6 +433,14 @@ def train(
         if prior_env is not None:
             prior_env = use_quadruped_physical_observation(
                 env_name, prior_env, quadruped_physical_observation
+            )
+        env = use_known_reward_observation(env_name, env, known_reward_type)
+        eval_env = use_known_reward_observation(
+            env_name, eval_env, known_reward_type
+        )
+        if prior_env is not None:
+            prior_env = use_known_reward_observation(
+                env_name, prior_env, known_reward_type
             )
         env.observation_space.seed(seed)
         eval_env.observation_space.seed(seed + 42)

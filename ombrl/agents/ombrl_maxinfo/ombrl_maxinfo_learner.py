@@ -16,6 +16,10 @@ from jaxrl.networks import critic_net, policies
 from jaxrl.networks.common import InfoDict, Model, Params, PRNGKey
 
 from maxinforl_jax.models import EnsembleState, DeterministicEnsemble, ProbabilisticEnsemble
+from ombrl.utils.known_rewards import (
+    MOUNTAIN_CAR_REWARD,
+    known_reward_and_termination,
+)
 
 
 def get_imagined_batch(
@@ -24,6 +28,7 @@ def get_imagined_batch(
         ens_state: EnsembleState,
         known_input_effect: Optional[jnp.ndarray],
         input_knowledge: bool,
+        known_reward_type: Optional[str],
         predict_rewards: bool,
         predict_diff: bool,
         sample_model: bool,
@@ -91,6 +96,15 @@ def get_imagined_batch(
         else:
             next_state = next_state + known_input_effect
 
+    if known_reward_type is not None:
+        imagined_rewards, imagined_terminations = known_reward_and_termination(
+            reward_type=known_reward_type,
+            actions=batch.actions,
+            next_observations=next_state,
+            action_repeat=action_repeat,
+        )
+        imagined_masks = 1.0 - imagined_terminations.astype(batch.masks.dtype)
+
     if internal_noise_samples > 1:
         def repeat_batch_field(x):
             repeated = jnp.broadcast_to(
@@ -102,12 +116,27 @@ def get_imagined_batch(
         imagined_batch = batch._replace(
             observations=repeat_batch_field(batch.observations),
             actions=repeat_batch_field(batch.actions),
-            rewards=repeat_batch_field(batch.rewards),
-            masks=repeat_batch_field(batch.masks),
+            rewards=(
+                imagined_rewards.reshape(-1)
+                if known_reward_type is not None
+                else repeat_batch_field(batch.rewards)
+            ),
+            masks=(
+                imagined_masks.reshape(-1)
+                if known_reward_type is not None
+                else repeat_batch_field(batch.masks)
+            ),
             next_observations=next_state.reshape((-1,) + next_state.shape[2:]),
         )
     else:
-        imagined_batch = batch._replace(next_observations=next_state)
+        if known_reward_type is not None:
+            imagined_batch = batch._replace(
+                rewards=imagined_rewards,
+                masks=imagined_masks,
+                next_observations=next_state,
+            )
+        else:
+            imagined_batch = batch._replace(next_observations=next_state)
     return imagined_batch
 
 
@@ -291,6 +320,7 @@ def update_critic_local(key: PRNGKey,
                                     'use_action_entropy',
                                     'use_dynamics_entropy',
                                     'input_knowledge',
+                                    'known_reward_type',
                                     'quadruped_state_metrics',
                                     ))
 def _update_jit(
@@ -303,6 +333,7 @@ def _update_jit(
         internal_noise_std: float, internal_noise_samples: int, dt: float, action_repeat: int,
         deterministic_policy: bool, use_action_entropy: bool, use_dynamics_entropy: bool,
         known_input_effect: Optional[jnp.ndarray], input_knowledge: bool,
+        known_reward_type: Optional[str],
         quadruped_state_metrics: bool,
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, Model, Model, EnsembleState, InfoDict]: # type: ignore
     rng, key = jax.random.split(rng)
@@ -336,6 +367,7 @@ def _update_jit(
         ens=ens,
         known_input_effect=known_input_effect,
         input_knowledge=input_knowledge,
+        known_reward_type=known_reward_type,
         predict_diff=predict_diff,
         predict_rewards=predict_rewards,
         sample_model=sample_model,
@@ -464,6 +496,11 @@ def _update_jit(
         'model_one_step_normalized_rmse': jnp.sqrt(jnp.mean(jnp.square(
             one_step_error / jnp.maximum(output_std, 1e-3)))),
         'model_transition_rms': transition_rms,
+        'replay_reward_mean': jnp.mean(batch.rewards),
+        'replay_reward_max': jnp.max(batch.rewards),
+        'replay_nonzero_reward_fraction': jnp.mean(
+            jnp.abs(batch.rewards) > 1e-12
+        ),
     }
     if quadruped_state_metrics:
         coordinate_groups = (
@@ -496,6 +533,29 @@ def _update_jit(
             'input_prior_one_step_rmse': model_info['model_one_step_rmse'],
         }
 
+    known_reward_info = {}
+    if known_reward_type is not None:
+        known_real_reward, known_real_termination = known_reward_and_termination(
+            reward_type=known_reward_type,
+            actions=batch.actions,
+            next_observations=batch.next_observations,
+            action_repeat=action_repeat,
+        )
+        known_real_mask = 1.0 - known_real_termination.astype(batch.masks.dtype)
+        known_reward_info = {
+            'known_reward_real_rmse': jnp.sqrt(jnp.mean(jnp.square(
+                known_real_reward - batch.rewards
+            ))),
+            'known_reward_real_mask_mismatch_fraction': jnp.mean(
+                known_real_mask != batch.masks
+            ),
+            'known_reward_imagined_mean': jnp.mean(imagined_batch.rewards),
+            'known_reward_imagined_max': jnp.max(imagined_batch.rewards),
+            'known_reward_imagined_nonzero_fraction': jnp.mean(
+                jnp.abs(imagined_batch.rewards) > 1e-12
+            ),
+        }
+
     new_ens_state, (loss, mse) = ens.update(
         input=_ensemble_input(batch.observations, batch.actions, input_knowledge),
         output=outputs,
@@ -514,6 +574,7 @@ def _update_jit(
                 # 'ens_info_gain_num_points': ens_state.ensemble_normalizer_state.info_gain_normalizer_state.num_points,
                 **model_info,
                 **prior_info,
+                **known_reward_info,
                 }
 
     return rng, \
@@ -582,6 +643,7 @@ class MaxInfoOmbrlLearner(object):
                  dt: float = None,
                  action_repeat: int = None,
                  input_knowledge: bool = False,
+                 known_reward_type: Optional[str] = None,
                  quadruped_state_metrics: bool = False,
                  ):
         """
@@ -589,16 +651,21 @@ class MaxInfoOmbrlLearner(object):
         """
 
         self.input_knowledge = input_knowledge
+        self.known_reward_type = known_reward_type
         self.quadruped_state_metrics = quadruped_state_metrics
         if self.quadruped_state_metrics and observations.shape[-1] != 55:
             raise ValueError(
                 "Quadruped state metrics require the 55-dimensional physical "
                 f"observation, got {observations.shape[-1]}."
             )
-        # Rewards in these tasks depend on the action-driven next state. They
-        # cannot be learned by the state-only prior model and are not used to
-        # construct imagined batches, so omit that otherwise impossible head.
-        self.predict_reward = predict_reward and not input_knowledge
+        # A state-only prior cannot learn an action-dependent reward head.
+        # Known-reward runs evaluate the task map after constructing each
+        # imagined next state, so neither path needs that ensemble output.
+        self.predict_reward = (
+            predict_reward
+            and not input_knowledge
+            and known_reward_type is None
+        )
         self.predict_diff = predict_diff
         self.num_heads = num_heads
         self.sample_model = sample_model
@@ -754,6 +821,16 @@ class MaxInfoOmbrlLearner(object):
             assert pseudo_ct == False, f"continuous-time must be disabled for given dt, got: {pseudo_ct}"
         self.dt = dt
         self.action_repeat = action_repeat
+        if (self.known_reward_type is not None
+                and (self.action_repeat is None or self.action_repeat < 1)):
+            raise ValueError(
+                "Known imagined rewards require a positive action_repeat."
+            )
+        if (self.known_reward_type == MOUNTAIN_CAR_REWARD
+                and self.action_repeat != 1):
+            raise ValueError(
+                "The exact MountainCar known reward requires action_repeat=1."
+            )
 
     def _should_perturb(self) -> bool:
         return self.step >= 1 and self.step % self.reset_period == 0
@@ -835,6 +912,7 @@ class MaxInfoOmbrlLearner(object):
             use_dynamics_entropy=self.use_dynamics_entropy,
             known_input_effect=known_input_effect,
             input_knowledge=self.input_knowledge,
+            known_reward_type=self.known_reward_type,
             quadruped_state_metrics=self.quadruped_state_metrics,
         )
 
