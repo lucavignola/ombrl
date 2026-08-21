@@ -186,7 +186,10 @@ def generate_run_commands(command_list, num_cpus=1, num_gpus=0, dry=False,
 
 
 def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY, input_knowledge=False,
-                cache_input_effects=True, known_reward=False):
+                cache_input_effects=True, known_reward=False,
+                policy_imagination=False,
+                policy_imagination_refreshes=1,
+                full_state_process_noise=False):
     flags = []
     for task in TASKS:
         for alg in [MBPO_OPTIMISTIC, MBPO_MEAN, MBPO_GREEDY]:
@@ -200,10 +203,37 @@ def build_flags(project_name=PROJECT_NAME, entity_name=ENTITY, input_knowledge=F
                 and set(task_flags['env_name']).issubset(KNOWN_REWARD_TASKS)
             )
             task_flags['known_reward'] = [int(task_uses_known_reward)]
+            task_uses_policy_imagination = (
+                policy_imagination and task_uses_known_reward
+            )
+            task_flags['policy_imagination'] = [
+                int(task_uses_policy_imagination)
+            ]
+            task_flags['policy_imagination_refreshes'] = [
+                (
+                    policy_imagination_refreshes
+                    if task_uses_policy_imagination
+                    else 0
+                )
+            ]
+            if (full_state_process_noise
+                    and task_flags['env_name'] != ['MountainCarContinuous-v0']):
+                task_flags['process_position_noise_std'] = (
+                    COMMON['process_noise_std']
+                )
             if input_knowledge:
                 task_flags['exp_hash'] = [f"{task_flags['exp_hash'][0]}_input_knowledge"]
             if task_uses_known_reward:
                 task_flags['exp_hash'] = [f"{task_flags['exp_hash'][0]}_known_reward"]
+            if task_uses_policy_imagination:
+                task_flags['exp_hash'] = [
+                    f"{task_flags['exp_hash'][0]}_policy_imagination"
+                ]
+            if (full_state_process_noise
+                    and task_flags['env_name'] != ['MountainCarContinuous-v0']):
+                task_flags['exp_hash'] = [
+                    f"{task_flags['exp_hash'][0]}_full_state_noise"
+                ]
             flags.extend(dict_permutations(task_flags))
     return flags
 
@@ -232,6 +262,14 @@ def validate_experiment_flags(flags):
 
 
 def main(args):
+    if args.policy_imagination and not args.known_reward:
+        raise ValueError(
+            "--policy_imagination requires --known_reward."
+        )
+    if args.policy_imagination_refreshes < 0:
+        raise ValueError(
+            "--policy_imagination_refreshes must be non-negative."
+        )
     command_list = []
     logs_dir = args.logs_dir
     if args.mode == 'euler' and logs_dir is None:
@@ -249,6 +287,9 @@ def main(args):
         args.input_knowledge,
         args.cache_input_effects,
         args.known_reward,
+        args.policy_imagination,
+        args.policy_imagination_refreshes,
+        args.full_state_process_noise,
     )
     validate_experiment_flags(all_flags)
 
@@ -293,4 +334,7 @@ if __name__ == '__main__':
         help='Use known imagined rewards for MountainCar, Cartpole, and Hopper.',
     )
     parser.add_argument('--cache_input_effects', type=int, default=1)
+    parser.add_argument('--policy_imagination', action='store_true')
+    parser.add_argument('--policy_imagination_refreshes', type=int, default=1)
+    parser.add_argument('--full_state_process_noise', action='store_true')
     main(parser.parse_args())

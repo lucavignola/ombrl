@@ -322,6 +322,7 @@ def update_critic_local(key: PRNGKey,
                                     'input_knowledge',
                                     'known_reward_type',
                                     'quadruped_state_metrics',
+                                    'policy_imagination',
                                     ))
 def _update_jit(
         rng: PRNGKey, actor: Model, critic: Model, target_actor: Model, target_critic: Model, temp: Model, # type: ignore
@@ -335,6 +336,9 @@ def _update_jit(
         known_input_effect: Optional[jnp.ndarray], input_knowledge: bool,
         known_reward_type: Optional[str],
         quadruped_state_metrics: bool,
+        policy_imagination_actions: Optional[jnp.ndarray],
+        policy_imagination_input_effect: Optional[jnp.ndarray],
+        policy_imagination: bool,
 ) -> Tuple[PRNGKey, Model, Model, Model, Model, Model, Model, EnsembleState, InfoDict]: # type: ignore
     rng, key = jax.random.split(rng)
     if update_critic_with_real_data:
@@ -360,12 +364,37 @@ def _update_jit(
         critic_info = {}
         real_target_q = None
 
+    if policy_imagination:
+        model_batch = batch._replace(
+            observations=jnp.concatenate(
+                (batch.observations, batch.observations), axis=0
+            ),
+            actions=jnp.concatenate(
+                (batch.actions, policy_imagination_actions), axis=0
+            ),
+            rewards=jnp.concatenate((batch.rewards, batch.rewards), axis=0),
+            masks=jnp.concatenate((batch.masks, batch.masks), axis=0),
+            next_observations=jnp.concatenate(
+                (batch.next_observations, batch.next_observations), axis=0
+            ),
+        )
+        model_input_effect = (
+            jnp.concatenate(
+                (known_input_effect, policy_imagination_input_effect), axis=0
+            )
+            if input_knowledge
+            else None
+        )
+    else:
+        model_batch = batch
+        model_input_effect = known_input_effect
+
     rng, model_sample_key = jax.random.split(rng)
-    imagined_batch = get_imagined_batch(
-        batch=batch,
+    all_imagined_batch = get_imagined_batch(
+        batch=model_batch,
         ens_state=ens_state,
         ens=ens,
-        known_input_effect=known_input_effect,
+        known_input_effect=model_input_effect,
         input_knowledge=input_knowledge,
         known_reward_type=known_reward_type,
         predict_diff=predict_diff,
@@ -377,6 +406,24 @@ def _update_jit(
         dt=dt,
         action_repeat=action_repeat,
     )
+
+    if policy_imagination:
+        model_batch_size = model_batch.observations.shape[0]
+        replay_batch_size = batch.observations.shape[0]
+
+        def select_policy_imaginations(x):
+            by_noise_sample = x.reshape(
+                (internal_noise_samples, model_batch_size) + x.shape[1:]
+            )
+            policy_values = by_noise_sample[:, replay_batch_size:]
+            return policy_values.reshape((-1,) + x.shape[1:])
+
+        critic_imagined_batch = jax.tree_util.tree_map(
+            select_policy_imaginations, all_imagined_batch
+        )
+    else:
+        critic_imagined_batch = all_imagined_batch
+
     rng, key = jax.random.split(rng)
     new_critic, ens_state, imagined_critic_info, imagined_target_q = update_critic_local(
         key=key,
@@ -387,7 +434,7 @@ def _update_jit(
         dyn_entropy_temp=dyn_entropy_temp,
         ens=ens,
         ens_state=ens_state,
-        batch=imagined_batch,
+        batch=critic_imagined_batch,
         discount=discount,
         backup_entropy=backup_entropy,
         deterministic_policy=deterministic_policy,
@@ -397,12 +444,15 @@ def _update_jit(
     )
 
     value_model_info = {}
-    if update_critic_with_real_data:
+    if update_critic_with_real_data and not policy_imagination:
         if internal_noise_samples > 1:
             imagined_target_q = imagined_target_q.reshape(
-                internal_noise_samples, batch.rewards.shape[0]
+                internal_noise_samples, model_batch.rewards.shape[0]
             ).mean(axis=0)
-        target_error = imagined_target_q - real_target_q
+        behavior_imagined_target_q = imagined_target_q[
+            :batch.rewards.shape[0]
+        ]
+        target_error = behavior_imagined_target_q - real_target_q
         value_model_info = {
             'model_value_target_bias': jnp.mean(target_error),
             'model_value_target_rmse': jnp.sqrt(
@@ -478,10 +528,9 @@ def _update_jit(
     if predict_rewards:
         outputs = jnp.concatenate([outputs, batch.rewards.reshape(-1, 1)], axis=-1)
 
-    if internal_noise_samples > 1:
-        imagined_next = imagined_batch.next_observations[:batch.observations.shape[0]]
-    else:
-        imagined_next = imagined_batch.next_observations
+    imagined_next = all_imagined_batch.next_observations[
+        :batch.observations.shape[0]
+    ]
     one_step_error = imagined_next - batch.next_observations
     transition_rms = jnp.sqrt(jnp.mean(jnp.square(
         batch.next_observations - batch.observations)))
@@ -502,6 +551,19 @@ def _update_jit(
             jnp.abs(batch.rewards) > 1e-12
         ),
     }
+    if policy_imagination:
+        action_delta = policy_imagination_actions - batch.actions
+        model_info.update({
+            'policy_imagination_action_delta_rms': jnp.sqrt(
+                jnp.mean(jnp.square(action_delta))
+            ),
+            'policy_imagination_action_rms': jnp.sqrt(
+                jnp.mean(jnp.square(policy_imagination_actions))
+            ),
+            'replay_action_rms': jnp.sqrt(
+                jnp.mean(jnp.square(batch.actions))
+            ),
+        })
     if quadruped_state_metrics:
         coordinate_groups = (
             ('root_pose', 0, 5),
@@ -549,12 +611,42 @@ def _update_jit(
             'known_reward_real_mask_mismatch_fraction': jnp.mean(
                 known_real_mask != batch.masks
             ),
-            'known_reward_imagined_mean': jnp.mean(imagined_batch.rewards),
-            'known_reward_imagined_max': jnp.max(imagined_batch.rewards),
+            'known_reward_imagined_mean': jnp.mean(
+                critic_imagined_batch.rewards
+            ),
+            'known_reward_imagined_max': jnp.max(
+                critic_imagined_batch.rewards
+            ),
             'known_reward_imagined_nonzero_fraction': jnp.mean(
-                jnp.abs(imagined_batch.rewards) > 1e-12
+                jnp.abs(critic_imagined_batch.rewards) > 1e-12
             ),
         }
+        if policy_imagination:
+            imagined_rewards_by_sample = all_imagined_batch.rewards.reshape(
+                internal_noise_samples, model_batch.rewards.shape[0]
+            )
+            behavior_imagined_rewards = imagined_rewards_by_sample[
+                :, :batch.rewards.shape[0]
+            ]
+            policy_imagined_rewards = imagined_rewards_by_sample[
+                :, batch.rewards.shape[0]:
+            ]
+            known_reward_info.update({
+                'known_reward_behavior_imagined_mean': jnp.mean(
+                    behavior_imagined_rewards
+                ),
+                'known_reward_policy_imagined_mean': jnp.mean(
+                    policy_imagined_rewards
+                ),
+                'known_reward_policy_imagined_max': jnp.max(
+                    policy_imagined_rewards
+                ),
+                'known_reward_policy_imagined_nonzero_fraction': (
+                    jnp.mean(
+                        jnp.abs(policy_imagined_rewards) > 1e-12
+                    )
+                ),
+            })
 
     new_ens_state, (loss, mse) = ens.update(
         input=_ensemble_input(batch.observations, batch.actions, input_knowledge),
@@ -645,6 +737,7 @@ class MaxInfoOmbrlLearner(object):
                  input_knowledge: bool = False,
                  known_reward_type: Optional[str] = None,
                  quadruped_state_metrics: bool = False,
+                 policy_imagination: bool = False,
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -653,6 +746,11 @@ class MaxInfoOmbrlLearner(object):
         self.input_knowledge = input_knowledge
         self.known_reward_type = known_reward_type
         self.quadruped_state_metrics = quadruped_state_metrics
+        self.policy_imagination = policy_imagination
+        if self.policy_imagination and self.known_reward_type is None:
+            raise ValueError(
+                "policy_imagination=True requires known rewards."
+            )
         if self.quadruped_state_metrics and observations.shape[-1] != 55:
             raise ValueError(
                 "Quadruped state metrics require the 55-dimensional physical "
@@ -811,6 +909,7 @@ class MaxInfoOmbrlLearner(object):
         self.ens_state = ens_state
         self.ensemble = ensemble
         self.rng = rng
+        self.imagination_rng = jax.random.PRNGKey(seed + 20_271)
 
         self.step = 1
         if dt is not None:
@@ -853,11 +952,55 @@ class MaxInfoOmbrlLearner(object):
         actions = np.asarray(actions)
         return np.clip(actions, -1, 1)
 
-    def update(self, batch: Batch, known_input_effect: Optional[np.ndarray] = None) -> InfoDict:
+    def sample_imagination_actions(
+            self,
+            observations: np.ndarray,
+            temperature: float = 1.0,
+    ) -> np.ndarray:
+        """Sample model-rollout actions without advancing behavior RNG."""
+        if self.deterministic_train_actions:
+            actions = _deterministic_policy_actions(
+                self.actor.apply_fn,
+                self.actor.params,
+                observations,
+            )
+        else:
+            self.imagination_rng, actions = policies.sample_actions(
+                self.imagination_rng,
+                self.actor.apply_fn,
+                self.actor.params,
+                observations,
+                temperature,
+            )
+        return np.clip(np.asarray(actions), -1, 1)
+
+    def update(
+            self,
+            batch: Batch,
+            known_input_effect: Optional[np.ndarray] = None,
+            policy_imagination_actions: Optional[np.ndarray] = None,
+            policy_imagination_input_effect: Optional[np.ndarray] = None,
+    ) -> InfoDict:
         if self.input_knowledge and known_input_effect is None:
             raise ValueError("known_input_effect must be provided when input_knowledge=True")
         if not self.input_knowledge:
             known_input_effect = None
+            policy_imagination_input_effect = None
+        if self.policy_imagination:
+            if policy_imagination_actions is None:
+                raise ValueError(
+                    "policy_imagination_actions must be provided when "
+                    "policy_imagination=True"
+                )
+            if (self.input_knowledge
+                    and policy_imagination_input_effect is None):
+                raise ValueError(
+                    "policy_imagination_input_effect must be provided for "
+                    "an input-knowledge policy rollout"
+                )
+        else:
+            policy_imagination_actions = None
+            policy_imagination_input_effect = None
 
         if self._reset_models:
             rng, self.rng = jax.random.split(self.rng)
@@ -914,6 +1057,9 @@ class MaxInfoOmbrlLearner(object):
             input_knowledge=self.input_knowledge,
             known_reward_type=self.known_reward_type,
             quadruped_state_metrics=self.quadruped_state_metrics,
+            policy_imagination_actions=policy_imagination_actions,
+            policy_imagination_input_effect=policy_imagination_input_effect,
+            policy_imagination=self.policy_imagination,
         )
 
         self.rng = new_rng

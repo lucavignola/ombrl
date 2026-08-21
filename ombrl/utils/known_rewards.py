@@ -1,6 +1,7 @@
 from typing import Optional, Tuple
 
 import jax.numpy as jnp
+import numpy as np
 
 
 MOUNTAIN_CAR_REWARD = "mountain_car_continuous"
@@ -35,11 +36,11 @@ def known_reward_and_termination(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Evaluate a known task reward on model-generated next observations.
 
-    Cartpole and Hopper expose rewards at every dm-control step. The current
-    replay transition spans ``action_repeat`` such steps but stores only the
-    final observation, so their outer-step reward is approximated by the final
-    stage reward times ``action_repeat``. The discrepancy from the real summed
-    reward is logged by the learner.
+    Cartpole and Hopper expose rewards at every dm-control step. In the known
+    reward experiment, their outer-step reward is defined as the final noisy
+    state reward times ``action_repeat``. ``KnownRewardTransition`` applies the
+    same definition to real transitions, so this map is exact even though it
+    differs from dm-control's usual sum over intermediate substeps.
     """
     if reward_type == MOUNTAIN_CAR_REWARD:
         position = jnp.clip(next_observations[..., 0], -1.2, 0.6)
@@ -82,5 +83,44 @@ def known_reward_and_termination(
             * hopping
         )
         return reward, jnp.zeros_like(standing)
+
+    raise ValueError(f"Unknown known-reward type: {reward_type!r}")
+
+
+def known_reward_and_termination_numpy(
+        reward_type: str,
+        action: np.ndarray,
+        next_observation: np.ndarray,
+        action_repeat: int,
+) -> Tuple[float, bool]:
+    """NumPy counterpart used to define exact real-environment rewards."""
+    action = np.asarray(action)
+    next_observation = np.asarray(next_observation)
+
+    if reward_type == MOUNTAIN_CAR_REWARD:
+        position = np.clip(next_observation[0], -1.2, 0.6)
+        velocity = np.clip(next_observation[1], -0.07, 0.07)
+        reached_goal = bool(position >= 0.45 and velocity >= 0.0)
+        reward = 100.0 * float(reached_goal) - 0.1 * float(action[0] ** 2)
+        return reward, reached_goal
+
+    if reward_type == CARTPOLE_SPARSE_REWARD:
+        cart_position = next_observation[0]
+        pole_cosine = next_observation[1]
+        pole_sine = next_observation[2]
+        pole_norm = max(float(np.hypot(pole_cosine, pole_sine)), 1e-6)
+        in_target = (
+            -0.25 <= cart_position <= 0.25
+            and pole_cosine / pole_norm >= 0.995
+        )
+        return float(action_repeat) * float(in_target), False
+
+    if reward_type == HOPPER_HOP_REWARD:
+        height = next_observation[-2]
+        speed = next_observation[-1]
+        standing = 0.6 <= height <= 2.0
+        hopping = np.clip(speed / 2.0, 0.0, 1.0)
+        reward = float(action_repeat) * float(standing) * float(hopping)
+        return reward, False
 
     raise ValueError(f"Unknown known-reward type: {reward_type!r}")

@@ -310,3 +310,48 @@ class InputEffectCache:
             self._valid[compute_slots] = True
 
         return self.effects[slots]
+
+
+class PolicyImaginationCache:
+    """Replay-aligned actor actions and optional exact input effects."""
+
+    def __init__(self, capacity: int, action_shape):
+        self.capacity = int(capacity)
+        self.actions = np.empty(
+            (self.capacity,) + tuple(action_shape), dtype=np.float32
+        )
+        self.effects = None
+        self._valid = np.zeros(self.capacity, dtype=bool)
+
+    def insert(self, index: int, action: np.ndarray,
+               effect: np.ndarray = None) -> None:
+        slot = int(index) % self.capacity
+        self.actions[slot] = np.asarray(action, dtype=np.float32)
+        if effect is not None:
+            effect = np.asarray(effect, dtype=np.float32)
+            if self.effects is None:
+                self.effects = np.empty(
+                    (self.capacity,) + effect.shape, dtype=np.float32
+                )
+            elif self.effects.shape[1:] != effect.shape:
+                raise ValueError(
+                    "Policy-imagination effect shape changed from "
+                    f"{self.effects.shape[1:]} to {effect.shape}."
+                )
+            self.effects[slot] = effect
+        self._valid[slot] = True
+
+    def get(self, indices: np.ndarray, require_effects: bool):
+        slots = np.asarray(indices, dtype=np.int64) % self.capacity
+        if not np.all(self._valid[slots]):
+            raise RuntimeError(
+                "Sampled a policy-imagination action before it was cached."
+            )
+        effects = None
+        if require_effects:
+            if self.effects is None:
+                raise RuntimeError(
+                    "Policy-imagination input effects were not cached."
+                )
+            effects = self.effects[slots]
+        return self.actions[slots], effects

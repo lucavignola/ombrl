@@ -3,6 +3,8 @@ from typing import Optional
 import numpy as np
 import gymnasium as gym
 
+from ombrl.utils.known_rewards import known_reward_and_termination_numpy
+
 
 class QuadrupedPhysicalStateObservation(gym.ObservationWrapper):
     """Expose MuJoCo integration state modulo horizontal translation.
@@ -99,6 +101,59 @@ class HopperKnownRewardObservation(gym.ObservationWrapper):
             np.asarray(observation, dtype=np.float32).reshape(-1),
             reward_coordinates,
         ))
+
+
+class KnownRewardTransition(gym.Wrapper):
+    """Make real and imagined transitions use the same known reward map.
+
+    For repeated-action dm-control tasks this deliberately defines the outer
+    reward from the final noisy state. That is the quantity available to the
+    one-step learned model; the original environment instead sums rewards from
+    intermediate, pre-noise simulator states.
+    """
+
+    def __init__(self, env, reward_type: str, action_repeat: int):
+        super().__init__(env)
+        self.reward_type = reward_type
+        self.action_repeat = int(action_repeat)
+        if self.action_repeat < 1:
+            raise ValueError("Known rewards require action_repeat >= 1.")
+        self._episode_return = 0.0
+        self._episode_outer_steps = 0
+
+    def reset(self, **kwargs):
+        self._episode_return = 0.0
+        self._episode_outer_steps = 0
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        observation, _, _, truncated, info = self.env.step(action)
+        reward, known_termination = known_reward_and_termination_numpy(
+            self.reward_type,
+            action,
+            observation,
+            self.action_repeat,
+        )
+        terminated = bool(known_termination)
+        self._episode_return += reward
+        self._episode_outer_steps += 1
+
+        info = dict(info)
+        info['known_reward_transition'] = True
+        if terminated or truncated:
+            episode = dict(info.get('episode', {}))
+            episode['return'] = self._episode_return
+            episode.setdefault(
+                'length', self._episode_outer_steps * self.action_repeat
+            )
+            episode.setdefault('duration', 0.0)
+            info['episode'] = episode
+        else:
+            # MountainCar may have terminated before post-transition process
+            # noise moved it away from the goal. The known noisy-state MDP has
+            # not terminated in that case.
+            info.pop('episode', None)
+        return observation, reward, terminated, truncated, info
 
 
 class PendulumInitWrapper(Wrapper):

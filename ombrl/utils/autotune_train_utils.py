@@ -17,10 +17,17 @@ from maxinforl_jax.datasets import NstepReplayBuffer
 from ombrl.utils.wrappers import (
     AdditiveGaussianProcessNoise,
     HopperKnownRewardObservation,
+    KnownRewardTransition,
     PendulumInitWrapper,
     QuadrupedPhysicalStateObservation,
 )
-from ombrl.utils.input_priors import EnvStateAccessor, InputEffectCache, SimulatorStateBuffer, TrueInputEffect
+from ombrl.utils.input_priors import (
+    EnvStateAccessor,
+    InputEffectCache,
+    PolicyImaginationCache,
+    SimulatorStateBuffer,
+    TrueInputEffect,
+)
 from ombrl.utils.known_rewards import HOPPER_HOP_REWARD
 from jaxrl.evaluation import evaluate
 from jaxrl.utils import make_env
@@ -332,6 +339,25 @@ def train(
 
     input_knowledge = alg_kwargs.get('input_knowledge', False)
     known_reward_type = alg_kwargs.get('known_reward_type')
+    policy_imagination = bool(
+        alg_kwargs.get('policy_imagination', False)
+    )
+    policy_imagination_refreshes = int(
+        alg_kwargs.pop('policy_imagination_refreshes', 1)
+    )
+    if policy_imagination and known_reward_type is None:
+        raise ValueError(
+            "policy_imagination=True requires known_reward=True."
+        )
+    if policy_imagination_refreshes < 0:
+        raise ValueError(
+            "policy_imagination_refreshes must be non-negative."
+        )
+    if policy_imagination and n_steps_returns >= 0:
+        raise NotImplementedError(
+            "Policy imagination currently supports one-step replay "
+            "buffers only."
+        )
 
     def with_process_noise(environment, noise_seed):
         return add_process_noise(
@@ -343,6 +369,15 @@ def train(
                 project_process_noise_to_constraints
             ),
             seed=noise_seed,
+        )
+
+    def with_known_reward_transition(environment):
+        if known_reward_type is None:
+            return environment
+        return KnownRewardTransition(
+            environment,
+            reward_type=known_reward_type,
+            action_repeat=env_kwargs.get('action_repeat', 1),
         )
 
     if save_video:
@@ -379,6 +414,8 @@ def train(
             )
         env = with_process_noise(env, seed)
         eval_env = with_process_noise(eval_env, seed + 42)
+        env = with_known_reward_transition(env)
+        eval_env = with_known_reward_transition(eval_env)
     elif 'metaworld' in env_name:
         _, task_name = env_name.split('_')
         env = make_metaworld_env(env_name=task_name, seed=seed, save_folder=video_train_folder, **env_kwargs)
@@ -397,6 +434,8 @@ def train(
             )
         env = with_process_noise(env, seed)
         eval_env = with_process_noise(eval_env, seed + 42)
+        env = with_known_reward_transition(env)
+        eval_env = with_known_reward_transition(eval_env)
     else:
         env = make_env(env_name=env_name, seed=seed,
                        save_folder=video_train_folder,
@@ -448,6 +487,8 @@ def train(
             prior_env.observation_space.seed(seed + 4242)
         env = with_process_noise(env, seed)
         eval_env = with_process_noise(eval_env, seed + 42)
+        env = with_known_reward_transition(env)
+        eval_env = with_known_reward_transition(eval_env)
 
     np.random.seed(seed)
     random.seed(seed)
@@ -479,22 +520,30 @@ def train(
                                   env.action_space.sample(), **alg_kwargs)
     elif alg_name == 'maxinfombsac':
         cache_input_effects = alg_kwargs.pop('cache_input_effects', True)
+        if (policy_imagination and input_knowledge
+                and not cache_input_effects):
+            raise ValueError(
+                "Input-knowledge policy imagination requires "
+                "cache_input_effects=True."
+            )
         agent = MaxInfoOmbrlLearner(seed,
                                     env.observation_space.sample(),
                                     env.action_space.sample(), **alg_kwargs)
+        replay_capacity = replay_buffer_size or max_steps
         input_effect = (
             TrueInputEffect(prior_env, env.action_space, preserve_state=False)
             if input_knowledge
             else None
         )
         input_effect_cache = (
-            InputEffectCache(replay_buffer_size or max_steps)
+            InputEffectCache(replay_capacity)
             if input_knowledge and cache_input_effects
             else None
         )
         simulator_state_buffer = (
-            SimulatorStateBuffer(replay_buffer_size or max_steps)
-            if input_knowledge and input_effect_cache is None
+            SimulatorStateBuffer(replay_capacity)
+            if (input_knowledge
+                and (input_effect_cache is None or policy_imagination))
             else None
         )
         simulator_state_accessor = (
@@ -502,6 +551,24 @@ def train(
             if input_knowledge
             else None
         )
+        # Keep actor-rollout actions aligned with replay slots. Exact prior
+        # effects can then be refreshed outside the JAX update hot path.
+        policy_imagination_cache = (
+            PolicyImaginationCache(replay_capacity, env.action_space.shape)
+            if policy_imagination
+            else None
+        )
+        if policy_imagination_cache is not None:
+            if not isinstance(env.action_space, gym.spaces.Box):
+                raise TypeError(
+                    "Policy imagination requires a continuous Box "
+                    "action space."
+                )
+            if (not np.all(np.isfinite(env.action_space.low))
+                    or not np.all(np.isfinite(env.action_space.high))):
+                raise ValueError(
+                    "Policy imagination requires bounded actions."
+                )
     else:
         raise NotImplementedError()
     if alg_name != 'maxinfombsac':
@@ -509,6 +576,7 @@ def train(
         input_effect_cache = None
         simulator_state_buffer = None
         simulator_state_accessor = None
+        policy_imagination_cache = None
     if n_steps_returns < 0:
         replay_buffer = ReplayBuffer(observation_space=env.observation_space,
                                      action_space=env.action_space,
@@ -533,15 +601,31 @@ def train(
             action = env.action_space.sample()
         else:
             action = agent.sample_actions(observation)
-        if simulator_state_buffer is not None:
+        replay_insert_index = None
+        if (simulator_state_buffer is not None
+                or input_effect_cache is not None
+                or policy_imagination_cache is not None):
             replay_insert_index = _get_replay_insert_index(replay_buffer, i - 1)
-            simulator_state_buffer.insert(replay_insert_index, simulator_state_accessor.snapshot())
-        elif input_effect_cache is not None:
-            replay_insert_index = _get_replay_insert_index(replay_buffer, i - 1)
+
+        behavior_input_effect = None
+        if input_effect is not None:
             simulator_state = simulator_state_accessor.snapshot()
-            input_effect_cache.insert(
+            if simulator_state_buffer is not None:
+                simulator_state_buffer.insert(
+                    replay_insert_index, simulator_state
+                )
+            if input_effect_cache is not None:
+                behavior_input_effect = input_effect.effect_from_state(
+                    simulator_state, action
+                )
+                input_effect_cache.insert(
+                    replay_insert_index, behavior_input_effect
+                )
+        if policy_imagination_cache is not None:
+            policy_imagination_cache.insert(
                 replay_insert_index,
-                input_effect.effect_from_state(simulator_state, action),
+                action,
+                behavior_input_effect,
             )
         next_observation, reward, terminate, truncate, info = env.step(action)
 
@@ -574,7 +658,7 @@ def train(
         if i >= training_start:
             aggregated_update_info = {}
             for _ in range(updates_per_step):
-                if input_effect is None:
+                if input_effect is None and policy_imagination_cache is None:
                     batch = replay_buffer.sample(batch_size)
                     update_info = agent.update(batch)
                 else:
@@ -582,16 +666,37 @@ def train(
                         replay_buffer,
                         batch_size,
                     )
-                    if input_effect_cache is not None:
-                        known_input_effect = input_effect_cache.get(batch_indices)
-                    else:
-                        simulator_states = simulator_state_buffer.get(batch_indices)
-                        known_input_effect = input_effect.batch_effect_from_states(
-                            simulator_states,
-                            batch.actions,
-                            batch.observations.shape[1:],
+                    known_input_effect = None
+                    if input_effect is not None:
+                        if input_effect_cache is not None:
+                            known_input_effect = input_effect_cache.get(batch_indices)
+                        else:
+                            simulator_states = simulator_state_buffer.get(batch_indices)
+                            known_input_effect = input_effect.batch_effect_from_states(
+                                simulator_states,
+                                batch.actions,
+                                batch.observations.shape[1:],
+                            )
+                    policy_imagination_actions = None
+                    policy_imagination_input_effect = None
+                    if policy_imagination_cache is not None:
+                        (
+                            policy_imagination_actions,
+                            policy_imagination_input_effect,
+                        ) = policy_imagination_cache.get(
+                            batch_indices,
+                            require_effects=input_knowledge,
                         )
-                    update_info = agent.update(batch, known_input_effect=known_input_effect)
+                    update_info = agent.update(
+                        batch,
+                        known_input_effect=known_input_effect,
+                        policy_imagination_actions=(
+                            policy_imagination_actions
+                        ),
+                        policy_imagination_input_effect=(
+                            policy_imagination_input_effect
+                        ),
+                    )
                 aggregated_update_info.update(update_info)
 
             update_info = aggregated_update_info
@@ -600,6 +705,42 @@ def train(
                 for k, v in update_info.items():
                     summary_writer.add_scalar(f'training/{k}', v, i)
                 summary_writer.flush()
+
+            if (policy_imagination_cache is not None
+                    and policy_imagination_refreshes > 0):
+                refresh_batch, refresh_indices = (
+                    _sample_replay_buffer_with_indices(
+                        replay_buffer,
+                        min(policy_imagination_refreshes,
+                            _get_replay_size(replay_buffer)),
+                    )
+                )
+                refresh_actions = np.atleast_2d(
+                    agent.sample_imagination_actions(
+                        refresh_batch.observations
+                    )
+                )
+                refresh_effects = None
+                if input_knowledge:
+                    refresh_states = simulator_state_buffer.get(
+                        refresh_indices
+                    )
+                    refresh_effects = input_effect.batch_effect_from_states(
+                        refresh_states,
+                        refresh_actions,
+                        refresh_batch.observations.shape[1:],
+                    )
+                for refresh_position, refresh_index in enumerate(
+                        refresh_indices):
+                    policy_imagination_cache.insert(
+                        refresh_index,
+                        refresh_actions[refresh_position],
+                        (
+                            None
+                            if refresh_effects is None
+                            else refresh_effects[refresh_position]
+                        ),
+                    )
 
         if i % eval_interval == 0:
             eval_stats = evaluate(agent, eval_env, eval_episodes)

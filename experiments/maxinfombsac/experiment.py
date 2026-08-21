@@ -55,6 +55,8 @@ def experiment(
         input_knowledge: bool = False,
         known_reward: bool = False,
         cache_input_effects: bool = True,
+        policy_imagination: bool = False,
+        policy_imagination_refreshes: int = 1,
 ):
     from ombrl.utils.autotune_train_utils import train
     from ombrl.utils.known_rewards import resolve_known_reward_type
@@ -64,6 +66,12 @@ def experiment(
         raise ValueError("known_reward=True requires alg_name='maxinfombsac'.")
     if known_reward_type is not None and action_cost != 0.0:
         raise ValueError("known_reward=True currently requires action_cost=0.")
+    if policy_imagination and known_reward_type is None:
+        raise ValueError(
+            "policy_imagination=True requires known_reward=True."
+        )
+    if policy_imagination_refreshes < 0:
+        raise ValueError("policy_imagination_refreshes must be non-negative.")
     
     env_kwargs = {
         'action_cost': action_cost,
@@ -124,6 +132,10 @@ def experiment(
             alg_kwargs['input_knowledge'] = input_knowledge
             alg_kwargs['known_reward_type'] = known_reward_type
             alg_kwargs['cache_input_effects'] = cache_input_effects
+            alg_kwargs['policy_imagination'] = policy_imagination
+            alg_kwargs['policy_imagination_refreshes'] = (
+                policy_imagination_refreshes
+            )
             alg_kwargs['quadruped_state_metrics'] = (
                 quadruped_physical_observation
             )
@@ -184,6 +196,8 @@ def experiment(
         'known_reward': known_reward,
         'known_reward_type': known_reward_type,
         'cache_input_effects': cache_input_effects,
+        'policy_imagination': policy_imagination,
+        'policy_imagination_refreshes': policy_imagination_refreshes,
     }
 
     train(
@@ -277,6 +291,8 @@ def main(args):
         input_knowledge=bool(args.input_knowledge),
         known_reward=bool(args.known_reward),
         cache_input_effects=bool(args.cache_input_effects),
+        policy_imagination=bool(args.policy_imagination),
+        policy_imagination_refreshes=args.policy_imagination_refreshes,
     )
 
 
@@ -338,6 +354,8 @@ if __name__ == '__main__':
     parser.add_argument('--input_knowledge', type=int, default=0)
     parser.add_argument('--known_reward', type=int, default=0)
     parser.add_argument('--cache_input_effects', type=int, default=1)
+    parser.add_argument('--policy_imagination', type=int, default=0)
+    parser.add_argument('--policy_imagination_refreshes', type=int, default=1)
 
     parser.add_argument('--seed', type=int, default=0)
 
